@@ -1,0 +1,12 @@
+.zig-cache/
+zig-out/
+result
+result-release
+.direnv/
+.DS_Store
+__pycache__/
+zig-out-debug/
+zig-out-perf/
+zig-out-intel/
+dist/
+docs/experiments/

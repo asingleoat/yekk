@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Yekk
+Comment=View and inspect photos
+Exec=yekk %F
+Terminal=false
+Categories=Graphics;Photography;Viewer;
+MimeType=image/jpeg;image/png;image/tiff;image/webp;image/avif;image/heif;image/heic;image/jxl;image/gif;image/bmp;

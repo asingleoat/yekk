@@ -1,0 +1,89 @@
+name: Prepare release artifacts
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+        with:
+          determinate: ${{ matrix.os != 'macos-15-intel' }}
+          source-tag: ${{ matrix.os == 'macos-15-intel' && 'v3.12.2' || '' }}
+      - name: Test and build DMG (no Developer ID or notarization)
+        run: |
+          nix build path:. --no-link
+          nix develop path:. --command zig build test dmg -Doptimize=ReleaseSafe -Dcpu=baseline
+      - name: Verify viewing from the mounted DMG
+        run: nix develop path:. --command python3 scripts/macos-release-test.py --package dist --output dist/macos-release-validation.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macOS-${{ runner.arch }}
+          path: |
+            dist/*.dmg
+            dist/*.json
+            dist/*.sha256
+            dist/*library-sources.tar.gz
+          if-no-files-found: error
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@c5a866b6ab867e88becbed4467b93592bce69f8a # v21
+      - name: Prepare distribution namespace helper
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          test "$(sudo /usr/bin/bwrap --ro-bind / / --proc /proc --dev-bind /dev /dev -- /usr/bin/setpriv --reuid "$(id -u)" --regid "$(id -g)" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- /usr/bin/id -u)" = "$(id -u)"
+      - name: Build mostly static executable and portable runtime
+        run: nix build path:.#linux-release --out-link result-release --print-build-logs
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp result-release/*.tar.gz result-release/*.json result-release/*.sha256 dist/
+      - name: Verify extracted artifact with Nix hidden
+        run: nix develop path:. --command python3 scripts/linux-release-test.py --package result-release --isolate --isolate-sudo --output dist/linux-release-validation.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: Linux-${{ runner.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.json
+            dist/*.sha256
+          if-no-files-found: error
+  source:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Archive exact release source
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix=yekk-source/ -o dist/yekk-source.tar.gz HEAD
+          git rev-parse HEAD > dist/SOURCE-COMMIT.txt
+          sha256sum dist/yekk-source.tar.gz | sed 's|  dist/|  |' > dist/yekk-source.tar.gz.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Source
+          path: dist/
