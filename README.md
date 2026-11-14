@@ -5,6 +5,9 @@ full-resolution zoom, slideshows and shell command hooks.
 
 It requires macOS 14+ or Linux with X11 or Wayland.
 
+Download macOS and Linux binaries from [Releases](https://github.com/asingleoat/yekk/releases).
+You do not need to build from source.
+
 ## Build and run
 
 [Nix](https://nixos.org/) supplies the pinned Zig master and dependencies.
