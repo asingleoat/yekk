@@ -1,68 +1,87 @@
 # Performance techniques
 
+See [caching](cache-and-pressure.md) for reuse of decoded images and prepared views.
+This guide covers the work needed when those results are not already available.
+
 ## TIFF decoding
 
-The shared Zig decoder handles supported contiguous RGB16 TIFFs. libtiff parses
-storage, normalizes byte order and decompresses strips or tiles.
-Other variants use the general library decoders.
+The shared Zig decoder handles supported interleaved 16-bit RGB TIFFs. Each pixel stores
+red, green and blue samples together. libtiff reads the file structure, converts
+byte order and decompresses the pixels. Other TIFF variants use the general decoders.
 
-One aligned slab holds pixels, copied ICC data, worker records and scratch.
-Workers use independent TIFF handles and disjoint output regions.
-Contiguous block ranges avoid per-block scheduling. Failure or cancellation
-joins all helpers before releasing storage. The decoder publishes only complete images.
+TIFF divides images into row strips or rectangular tiles. Workers decode separate
+blocks with separate libtiff handles. Each worker writes a different output region.
+Consecutive block ranges avoid a shared queue operation for every block.
 
-Each worker initializes its output row padding. This avoids a separate pass over
-the whole buffer. Transposed orientations use 32×32 traversal for cache locality.
-Orientation selection occurs outside the pixel loop. Channel insertion uses
-Accelerate on macOS and vectorized Zig on Linux.
+One allocation holds pixels, color-profile data, worker records and temporary
+buffers. Each worker initializes its own row padding. This avoids a separate
+initialization pass over the image. Cancellation waits for all workers before
+freeing that storage. The decoder publishes only complete images.
+
+Orientations that exchange width and height use 32×32 blocks for output writes.
+This keeps nearby writes close together in memory. Platform code adds the opaque
+alpha channel with Accelerate on macOS and vectorized Zig on Linux.
 
 ## SIMD prediction
 
-For supported RGB16 Deflate TIFFs with Predictor 2, Zig reconstructs three
-interleaved channel prefix sums modulo 2¹⁶. Eight-sample vectors use shifted
-additions. The last three reconstructed samples carry into the next vector.
-Scalar tails handle short rows. Carry resets at each row.
+TIFF Predictor 2 stores differences between adjacent samples of the same channel.
+The decoder adds those differences to reconstruct the original values:
 
-This path disables the library predictor but keeps library decompression.
-Output must match the native predictor byte for byte, including padding.
-Native predictor time belongs to block decoding. Zig predictor time belongs to
-conversion. Compare total decode time when evaluating these implementations.
+```text
+Stored values:   10,  2,  3
+Decoded values:  10, 12, 15
+```
+
+SIMD applies one CPU operation to several values at once. Zig processes eight
+16-bit samples per vector. It carries the last value for each color channel into
+the next vector. It handles remaining samples one at a time. Each row starts
+with fresh state. Arithmetic wraps at 65,536, as required for 16-bit samples.
+
+This path replaces prediction, not Deflate decompression. libtiff still decompresses
+the data. The reconstructed pixels and padding must match the library predictor
+byte for byte.
+
+The library includes prediction in block-decode time. Zig records it in conversion
+time. Compare total decode time when evaluating these paths.
 
 ## Workers and memory
 
-Automatic TIFF concurrency uses performance or physical cores on macOS.
-Linux uses physical cores within process affinity, with an available-core
-fallback. Loads share the budget. See [scheduling limits](cache-and-pressure.md#background-limits).
+macOS selects performance or physical cores. Linux counts physical cores allowed
+by the process's CPU affinity. Available logical cores provide a fallback.
+Loads share this worker budget. See [background limits](cache-and-pressure.md#background-limits).
 
-Production frees use the allocator's raw free interface to avoid overwriting a
-dead slab. The debug allocator keeps poisoning for lifetime checks.
-After helpers finish, dead scratch pages use `MADV_FREE` on macOS or
-`MADV_DONTNEED` on Linux. Live pixels and metadata remain untouched.
-Memory advice does not guarantee an immediate RSS reduction.
+Production cleanup avoids overwriting an entire image allocation before freeing it.
+The debug allocator keeps memory poisoning to detect lifetime errors.
+
+After workers finish, full pages of unused temporary storage can be released with
+`MADV_FREE` on macOS or `MADV_DONTNEED` on Linux. Live pixels and metadata remain
+available. This memory advice does not guarantee an immediate reduction in resident memory.
 
 ## Viewport rendering
 
-Linux keeps source pixels and dyadic reductions. Each level reduces dimensions
-by a power of two. Opaque images use three-channel working storage.
-Input conversion combines sRGB lookup, alpha normalization and premultiplication.
-Output tiles combine composition and sRGB encoding without a second full-view pass.
+Linux caches smaller versions of the source image. Each level halves width and
+height. Nearby zoom levels can reuse these pixels instead of reducing the full
+image again.
 
-Eligible integer-aligned opaque sRGB views bypass floating-point color work.
-The renderer copies 8-bit pixels or converts normalized 16-bit samples with
-widened `(sample + 128) / 257` arithmetic. Other views use the color pipeline.
-Nearest sampling selects source samples before conversion.
+Opaque images use three color channels in working buffers. They need no alpha
+channel there. Input conversion combines color conversion and alpha calculations.
+Output conversion combines background composition and sRGB encoding in one pass.
 
-Canvas bounds prevent unnecessary reads. Background and checker colors convert
-once per frame. The renderer selects opaque and alpha kernels outside pixel loops.
-Worker notifications avoid polling delays for normal requests.
-See [presentation](presentation.md) for native surfaces and textures.
+Aligned opaque sRGB views can use integer conversion when they need no filtering
+or profile conversion. The renderer copies 8-bit pixels directly. It converts
+normalized 16-bit samples with `(sample + 128) / 257`, using wider integers to
+prevent overflow. Other views use the general color pipeline.
+
+The renderer skips pixels outside the image area. It converts background colors
+once per frame and selects opaque or alpha-processing code outside pixel loops.
+Workers notify the UI when results are ready. No polling delay is needed for
+normal requests. See [presentation](presentation.md) for native display surfaces.
 
 ## Measurement
 
-Remove repeated work before optimizing instructions. Measure allocations, decoded
-bytes, repeated decodes, memory traffic and native costs alongside elapsed time.
+Remove repeated work before optimizing instructions. Measure elapsed time,
+allocations, decoded bytes, repeated decodes and native-library costs.
 Use branch-free code or SIMD when measurements show a benefit.
 
-Replace library decoders only after correctness and end-to-end performance checks.
-Preserve precision, profiles, alpha, malformed-input behavior and ownership.
-The main cost depends on the image and view. See [benchmarking](validation.md#benchmarking-and-profiling).
+A replacement decoder must improve end-to-end performance while preserving pixels,
+color profiles, alpha, error handling and ownership. See [benchmarking](validation.md#benchmarking-and-profiling).

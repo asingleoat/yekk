@@ -8,8 +8,8 @@ CLI behavior is shared across platforms. See [Linux](linux.md) for native contro
 Options support bundles (`-FZD3`), attached values (`-Sfilename`) and long-option
 values with `=`. `--` ends option parsing.
 
-No arguments opens the current directory. A file argument opens only that file.
-`--browse FILE` includes its directory. `--start-at FILE` alone opens its directory
+With no arguments, Yekk opens the current directory. A file argument opens only that file.
+`--browse FILE` includes other images from the same directory. `--start-at FILE` alone opens its directory
 and selects the file. With other paths, it selects the file within that list.
 
 | Options | Behavior |
@@ -47,12 +47,12 @@ Metadata listing reads headers and does not verify full decoding.
 ### File lists
 
 Lists accept newline-delimited paths and skip empty lines. CRLF is accepted.
-Input is limited to 1 MiB, 16,384 entries and 8 MiB of catalog paths.
+Input accepts at most 1 MiB, 16,384 entries and 8 MiB of copied paths.
 Relative paths use the working directory. Saved paths are absolute.
 Hooks and Trash preserve a file symlink's name and act on the link.
 
 Saving atomically replaces the named file, including a symlink at that name.
-Names containing LF or trailing CR are rejected before replacement.
+Names containing a line feed (LF) or trailing carriage return (CR) are rejected before replacement.
 Save errors return a nonzero exit status. A missing `-f` file without other
 inputs starts with the current directory.
 
@@ -76,14 +76,26 @@ Hooks run through `/bin/sh -c` with the viewer's environment and working directo
 Stdin is `/dev/null`. `%F` and `%N` already include shell quotation.
 Do not add quotation marks around them. Use `%%` for a literal percent sign.
 
-Supported substitutions:
+| Placeholder | Value |
+| --- | --- |
+| `%F`, `%N` | Full path; filename without its directory |
+| `%w`, `%h` | Image width; height in pixels |
+| `%s`, `%S` | Encoded file size in bytes; decimal MB |
+| `%p`, `%P` | Pixel count; decimal megapixels |
+| `%u`, `%l` | Current position, starting at 1; file-list count |
+| `%g` | Viewport width and height as `W,H`, in backing pixels |
+| `%o` | Image offset as `X,Y`, in backing pixels |
+| `%z`, `%Z` | Zoom percentage with two; eight decimal places |
+| `%r` | Rotation in radians |
+| `%a` | `playing` or `paused` |
+| `%m` | `slideshow` |
+| `%v`, `%V` | Yekk version; process ID |
+| `%t` | Source image format |
+| `%L` | Path to a temporary snapshot of the ordered file list |
+| `%%` | Literal percent sign |
 
-`%F`, `%N`, `%w`, `%h`, `%s`, `%S`, `%p`, `%P`, `%l`, `%u`, `%g`, `%o`, `%r`,
-`%z`, `%Z`, `%a`, `%m`, `%v`, `%V`, `%t`, `%L`, `%%`.
-
-`%L` creates one temporary list snapshot per command and removes it afterward.
-`%v` identifies Yekk. `%m` is `slideshow`. `%g` and `%o` use backing pixels.
-`%f`, `%n` and unknown specifiers cause an error.
+Path and format values include shell quotation. `%L` creates one snapshot per
+command and removes it afterward. `%f`, `%n` and unknown specifiers cause an error.
 
 Each window runs one hook at a time. Navigation remains available.
 Completion cannot advance a newer selection. If a hook moves the source away,
@@ -123,7 +135,7 @@ files. Actual size means one source pixel per display backing pixel.
 Bindings load from `$XDG_CONFIG_HOME/yekk/keys`, default `~/.config/yekk/keys`.
 Use `--keys FILE` for another file. Each line replaces an action's bindings.
 An action without keys removes its bindings. Later bindings win key conflicts.
-Modifiers are `C-` (Ctrl), `S-` (Shift), `1-` (Alt/Option) and `4-` (Super/Command).
+Key prefixes select modifiers: `C-` is Ctrl, `S-` is Shift, `1-` is Alt/Option and `4-` is Super/Command.
 Uppercase letters imply Shift.
 
 ```text

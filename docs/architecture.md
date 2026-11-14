@@ -1,12 +1,14 @@
 # Architecture
 
-Yekk uses Zig for shared logic and platform adapters. Nix pins the compiler and
-libraries. Zig's C translator imports system and third-party declarations.
+Shared Zig modules choose behavior. Platform adapters call the OS and native
+libraries. Nix pins the compiler and dependencies. Zig's C translator imports
+system and third-party declarations.
 
 ## Shared policy and native effects
 
 Validate input at module boundaries. Use types that preserve valid states.
-Keep state transitions pure where possible. Platform adapters apply native effects.
+Keep state transitions pure where possible. For example, the file-list writer
+accepts a validated `LineList` instead of checking raw input during output.
 
 | Modules | Responsibility |
 | --- | --- |
@@ -20,11 +22,8 @@ Keep state transitions pure where possible. Platform adapters apply native effec
 | `cache.zig`, `sessions.zig`, `memory.zig` | Cache policy, sessions and allocation tracking |
 | `tiff_pixels.zig` | RGB16 TIFF decoding and SIMD prediction |
 
-CLI modes use enums. Optional hook overrides distinguish inherited settings from
-disabled hooks. File-list output validates a borrowed `LineList` before writing.
-
-macOS adapters use AppKit, dispatch, ImageIO, Core Image and Core Graphics.
-Linux adapters use SDL, libvips, LittleCMS and GIO. Both use the shared policies.
+macOS uses AppKit, dispatch, ImageIO, Core Image and Core Graphics.
+Linux uses SDL, libvips, LittleCMS and GIO. Both adapters use the shared policies.
 
 ## Allocation and lifetime
 
@@ -32,28 +31,40 @@ Yekk makes one startup allocation and one owned allocation per loaded image
 representation. A representation is a decoded image at a given resolution.
 Libraries, threads and graphics drivers make separate allocations.
 
-The TIFF slab stores metadata, pixels, ICC data, worker records and scratch.
-A slab is one allocation with a checked layout. Catalog capacity is eight windows,
-16,384 entries and 8 MiB of copied paths per window.
+A TIFF allocation stores pixels, metadata, ICC color profiles, worker records and
+temporary buffers. Its layout is checked before allocation. Catalog capacity is
+eight windows, 16,384 entries and 8 MiB of copied paths per window.
 
-Workers return immutable results and retain sources until readers finish.
-A tagged frame type holds an owned buffer, native reference or exclusive buffer
-lease. All readers and the compositor must release a buffer before reuse.
+Workers do not change completed results. Jobs keep source pixels alive until
+readers finish. A frame records one of three ownership states:
+
+- An owned buffer.
+- A reference to a native display surface.
+- An exclusive lease on a reusable buffer.
+
+All readers and the compositor must release a buffer before reuse.
+
+## UI and workers
 
 The UI handles bounded state changes and presentation. Workers handle file access,
-indexing, decoding, rendering, hooks and resource release. Requests carry revisions.
-Handoffs use try-locks and bounded queues. A full release queue keeps ownership
-for a later handoff. The UI does not wait for workers or release large buffers.
+indexing, decoding, rendering, hooks and resource release.
 
-Closing hides the window before its coordinator cancels and joins workers.
-The session slot becomes available after cleanup.
+Requests carry revision numbers. Only a result for the current request can replace
+the display. The UI tries locks without waiting and defers work when a lock is busy.
+Queues have fixed capacity. If the release queue is full, the UI keeps ownership
+and tries the handoff later.
+
+Closing first hides the window. Its coordinator cancels work and waits for workers
+to finish. The session slot becomes available after cleanup.
 
 ## Image model
 
-Supported source pixels keep 8/16-bit precision and ICC profiles. The RGB16 TIFF
-path uses libtiff. Other variants use ImageIO on macOS or libvips on Linux.
-Output is SDR. Internal floating-point calculations support filtering and color
-conversion. HDR and clipboard operations are outside scope.
+Supported source pixels keep 8/16-bit precision and ICC color profiles.
+The shared RGB16 TIFF decoder uses libtiff. Other variants use ImageIO on macOS
+or libvips on Linux.
+
+Display output is standard dynamic range (SDR). Floating-point calculations
+support filtering and color conversion. HDR and clipboard operations are outside scope.
 
 See [caching](cache-and-pressure.md), [presentation](presentation.md),
 [performance](performance.md) and [region decoding](large-image-paging.md).

@@ -22,12 +22,13 @@ nix develop path:. -c python3 scripts/macos-release-test.py \
 ```
 
 Give `--package` one DMG path or a directory containing one DMG.
-Packaging writes checksums and provenance, audits library paths and tests
-relocation without Nix library paths. The release test mounts the DMG read-only,
+Packaging records checksums and library versions. It checks library paths and
+tests the relocated app without Nix library paths. The release test mounts the DMG read-only,
 tests its viewer and detaches it.
 
-Packages use local ad-hoc signatures without Developer ID or notarization.
-Downloaded apps may require Gatekeeper approval on first launch.
+Packages use local ad-hoc signatures. These have no publisher identity.
+There is no Developer ID signature or notarization. Downloaded apps may require
+Gatekeeper approval on first launch.
 Intel macOS uses a separate locked Nixpkgs Darwin branch with the same Zig master.
 
 ## Linux
@@ -39,11 +40,11 @@ nix develop path:. -c python3 scripts/linux-release-test.py \
 ```
 
 `--isolate` requires an ordinary Linux distribution with `/usr/bin/python3` and
-`/usr/bin/bwrap`. It hides `/nix` and tests the relocated archive.
+`/usr/bin/bwrap`. It makes `/nix` unavailable and tests the archive from a different directory.
 On NixOS, run under `steam-run` without `--isolate`.
 
-Add `--isolate-sudo` to `--isolate` where namespace setup needs privileges. Tests drop to the
-caller before execution. `--minimal-root PATH_TO_STATIC_BUSYBOX` provides a
+If namespace setup needs privileges, add `--isolate-sudo` to `--isolate`.
+The test setup uses sudo, then runs tests as the calling user. `--minimal-root PATH_TO_STATIC_BUSYBOX` provides a
 separate decoder-only check without Nix or host libraries.
 
 Extract `yekk-VERSION-linux-ARCH.tar.gz`. Run `./yekk`, or `steam-run ./yekk`
@@ -68,5 +69,5 @@ Generate the project archive from the release commit. Keep dependency sources
 and Nixpkgs recipes with the release. Do not reuse an older source archive.
 
 Run the [validation checks](validation.md) on mounted or extracted packages.
-Record architecture, OS, display backend, hashes and test limits under `dist/`.
-Test actual viewing on the intended desktop. Publish after manual review.
+Record architecture, OS, display backend, hashes and untested cases under `dist/`.
+Test viewing on the intended desktop. Publish after manual review.

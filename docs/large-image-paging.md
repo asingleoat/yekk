@@ -1,39 +1,44 @@
 # Large images and region decoding
 
-Yekk retains full decoded images and renders the visible viewport.
-Zooming to 100% and panning reuse those pixels. Available memory, checked sizes
-and native API constraints limit loading. Source-region paging is not implemented.
+Yekk loads the full decoded image. Zooming to 100% and panning reuse those pixels.
+Workers render only the visible viewport. Available memory, checked sizes and
+native API constraints limit loading.
+
+Region decoding would load only the source blocks needed for a view.
+Yekk does not implement it yet.
 
 ## Format constraints
 
-A small viewport does not guarantee a small decode. Cropping a decoded image or
-using tiled presentation does not provide source-region decoding.
+A small viewport does not guarantee a small decode. The file's compression layout
+determines how much data a decoder must read and decompress.
+Cropping an already decoded image does not reduce this work.
 
 | Source layout | Decode constraint |
 | --- | --- |
-| Tiled TIFF | Decode intersecting independent tiles. |
+| Tiled TIFF | Decode independent tiles that intersect the view. |
 | Small TIFF strips | Decode full-width strips, including pixels outside the view. |
 | Large compressed strips | A small view can require a large sequential decode. |
-| Image pyramid | Select a resolution level and its blocks. |
+| Image pyramid | Choose a resolution level, then its blocks. |
 | Other formats | Random access and downsampling depend on the decoder. |
 
-Compression and prediction constrain access within blocks. A generated pyramid
-or backing store adds initial work or temporary storage. It must improve viewing
-latency over full loading without changing source files.
+An image pyramid stores several resolutions. Generating one adds initial work or
+temporary storage. It must improve viewing latency over full loading without
+changing source files.
 
 ## Paged-backend requirements
 
-Keep an overview visible while loading detail. Key blocks by source version,
-resolution, coordinates and decode parameters. Request revisions control display
-replacement, not block identity. Reuse completed blocks and deduplicate pending work.
+- Keep an overview visible while detail loads.
+- Identify blocks by source version, resolution, coordinates and decode settings.
+- Use request revisions to control display replacement, not block identity.
+- Reuse completed blocks across pans and zooms. Do not schedule duplicate loads.
+- Keep storage alive while a view or render job reads it.
+- Fit reusable block slots, descriptors and temporary buffers into the image allocation.
+- Remove cached blocks under memory pressure.
 
-Pin visible blocks and native readers before reusing slots. Fit page slots,
-descriptors and scratch into the image allocation. Pressure-driven removal must
-avoid repeated decoding during pan and zoom cycles.
-
-Compare against full loading on real layouts. Measure first detail, repeated
-pans, decoded bytes, rendering and upload. Check samples, block boundaries,
-orientation, ICC, alpha, malformed offsets and cancellation.
+Compare against full loading on real file layouts. Measure time to first detail,
+repeated pans, decoded bytes, rendering and upload. Resident blocks must need no
+new decoding. Check pixels, block edges, orientation, profiles, alpha, invalid
+offsets and cancellation.
 
 ## TIFF probe
 
@@ -47,5 +52,5 @@ zig build tiff-probe -Doptimize=ReleaseSafe -- blocks-cached /tmp/yekk-tiled.tif
 
 Generation refuses to overwrite files. Other layouts are `strips` and
 `single-strip`. Modes include `blocks`, `imageio-preview` and `imageio-full`.
-Fixed cache and scratch limits apply only to this probe.
+Fixed cache and temporary-buffer limits apply only to this probe.
 See [benchmarking](validation.md#benchmarking-and-profiling).

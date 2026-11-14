@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Analyze paired minimums from a completed randomized benchmark study.
+"""Analyze paired minimums from a completed benchmark study.
 
-A quartet remains one replicate. Take the faster process workload summary for
-A and B within that quartet, then compare their logarithms. Preserve the raw
-study and its original analysis; write this analysis to a separate new file.
+Use the faster process result for each variant within a four-process block.
+Compare the paired results. Keep the raw study unchanged and write a new file.
 """
 import argparse
 import hashlib

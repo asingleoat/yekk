@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Randomized ABBA/BAAB comparisons of headless Yekk benchmarks.
+"""Collect randomized ABBA/BAAB trials from headless Yekk benchmarks.
 
-The replication unit is a four-process block, never an individual frame.
-No timing-based exclusions or significance-based early stopping are performed.
+Each four-process block is one measurement group.
+Keep all samples and complete the planned trial count.
 """
 import argparse
 import hashlib
@@ -137,7 +137,6 @@ report = {'started_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'pr
                        'replication_unit': 'four-process block; frame timings are not independent replicates',
                        'sub_tick_policy': 'per-process median below the reported clock resolution is conservatively floored to that resolution; raw values retained',
                        'stopping': 'fixed in advance; no significance-based stopping or timing exclusions',
-                       'interval': 'family-adjusted circular moving-block bootstrap; 3 consecutive blocks per resampled chunk',
                        'schedule': schedules, 'rounds': rounds},
           'plan': plan, 'image_sha256': digest(image),
           'binary_sha256': {p: digest(p)
@@ -173,54 +172,8 @@ for number, names in enumerate(rounds):
                 report['failed'] = True
                 save()
                 raise SystemExit('comparison failed; preserved without silently excluding it')
-        logs = {label: [math.log(r['metric_ms']) for r in block['runs'] if r['label'] == label] for label in 'AB'}
-        block['log_ratio'] = statistics.mean(logs['B']) - statistics.mean(logs['A'])
-        save()
     print(f'Completed round {number + 1}/{args.blocks}', flush=True)
 
-# Analyze only after the fixed schedule has completed. Resample whole temporal
-# chunks, rather than pretending frames or immediately adjacent runs are IID.
-report['analysis'] = {}
-family_alpha = 0.05 / len(comparisons)
-for index, c in enumerate(comparisons):
-    blocks = [b for b in report['blocks'] if b['name'] == c['name']]
-    effects = [b['log_ratio'] for b in blocks]
-    rng = random.Random(args.seed + index + 1)
-    distribution = []
-    for _ in range(20000):
-        sample = []
-        while len(sample) < len(effects):
-            start = rng.randrange(len(effects))
-            sample.extend(effects[(start + j) % len(effects)] for j in range(3))
-        distribution.append(statistics.mean(sample[:len(effects)]))
-    distribution.sort()
-    low = math.exp(distribution[int(len(distribution) * family_alpha / 2)])
-    high = math.exp(distribution[min(len(distribution)-1, math.ceil(len(distribution) * (1-family_alpha/2))-1)])
-    result = {'candidate_over_control': math.exp(statistics.mean(effects)),
-              'family_adjusted_interval': [low, high], 'interval_coverage': 1-family_alpha,
-              'blocks': len(blocks), 'chunk_blocks': 3,
-              'order_ratios': {order: math.exp(statistics.mean(b['log_ratio'] for b in blocks if b['order'] == order)) for order in ['ABBA', 'BAAB']},
-              'control_median_ms': statistics.median(r['metric_ms'] for b in blocks for r in b['runs'] if r['label'] == 'A'),
-              'candidate_median_ms': statistics.median(r['metric_ms'] for b in blocks for r in b['runs'] if r['label'] == 'B'),
-              'classification': 'faster' if high < 1 else 'slower' if low > 1 else 'inconclusive'}
-    # A randomization check follows the actual balanced orientation assignment.
-    # Under the sharp null, orientation only changes the sign of each block's
-    # time-slot contrast; unrestricted per-frame permutations would be invalid.
-    contrasts = [b['log_ratio'] * (1 if b['order'] == 'ABBA' else -1) for b in blocks]
-    observed = abs(statistics.mean(effects))
-    signs = [1] * (len(blocks) // 2) + [-1] * (len(blocks) // 2)
-    exceed = 0
-    for _ in range(20000):
-        rng.shuffle(signs)
-        exceed += abs(sum(sign * contrast for sign, contrast in zip(signs, contrasts)) / len(blocks)) >= observed
-    result['randomization_p'] = (exceed + 1) / 20001
-    result['family_alpha'] = family_alpha
-    result['order_disagreement'] = (result['order_ratios']['ABBA'] < 1) != (result['order_ratios']['BAAB'] < 1)
-    if result['randomization_p'] > family_alpha or result['order_disagreement']:
-        result['classification'] = 'inconclusive'
-    report['analysis'][c['name']] = result
-    print(c['name'], json.dumps(result), flush=True)
-report['sanity_passed'] = all(report['analysis'][c['name']]['classification'] == 'inconclusive' for c in comparisons if c['control'] == c['candidate'])
 report['image_stat_after'] = [image.stat().st_dev, image.stat().st_ino, image.stat().st_size, image.stat().st_mtime_ns, image.stat().st_ctime_ns]
 if report['image_stat_after'] != report['image_stat_before']:
     report['failed'] = True
@@ -228,3 +181,4 @@ if report['image_stat_after'] != report['image_stat_before']:
     raise SystemExit('input identity changed during the study')
 report['completed'] = True
 save()
+print('Collection complete. Analyze the saved study with scripts/bench-analyze.py.', flush=True)

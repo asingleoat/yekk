@@ -1,49 +1,51 @@
 # Caching and memory pressure
 
 Yekk keeps decoded images until memory pressure, allocation failure, source
-invalidation, reload, removal or session close. The cache has no fixed byte,
-age or image-count limit.
+changes, reload, removal or session close. The cache has no fixed byte, age or
+image-count limit.
 
 ## Reuse and prefetch
 
-After displaying the selected image, workers decode its neighbors and prepare
-views. Foreground requests take priority. Selecting an image during prefetch
-uses the existing load.
+After displaying the selected image, workers load the next and previous images
+and prepare their views. Foreground requests take priority. Selecting an image
+during prefetch uses the load already in progress.
 
-Cache keys include source version, geometry, filtering and output-profile
-generation. Request revisions control display replacement without invalidating
-reusable pixels. A ready cache hit can display while another view renders.
+A cached view must match its source version, geometry, filter and display color
+profile. Request revisions control which result can replace the display.
+A new selection does not invalidate reusable pixels. A ready cache hit can display
+while another view renders.
 
-The fitted view and latest interaction view occupy separate cache entries.
+The cache keeps the fitted view separately from the latest manually adjusted view.
 Manual zoom preserves the fitted view, including at scales below 100%.
-An exact view hit avoids decoding and rendering. New pan positions can require
-viewport rendering, but full decoded pixels need no further source decoding.
+An exact view hit avoids decoding and rendering. A new pan position can need
+viewport rendering, but it reuses the full decoded image.
 
 ## Background limits
 
-At most two native decodes run across windows, including one speculative decode.
-Speculative work prepares images before selection. Fast TIFF loads share a CPU
-worker budget. Speculative loads request at most half. `--decode-workers N`
-overrides automatic selection.
+At most two native decodes run across windows. At most one is speculative:
+it prepares an image before selection. Fast TIFF loads share a CPU worker budget.
+Speculative loads request at most half. `--decode-workers N` overrides automatic selection.
 
-macOS permits two viewport renders globally, including one speculative render.
+macOS permits two viewport renders globally, with at most one speculative render.
 Each source has one render owner. New requests replace pending work.
 Stale results cannot replace the current display.
 
 ## Pressure and failure
 
-macOS memory-pressure notifications request worker cleanup. Linux uses memory
-PSI triggers or stall-counter sampling. Pressure releases inactive history and
-derived views. It suspends adjacent prefetch for the affected selection.
+Memory pressure means that the OS reports a shortage of available memory.
+macOS notifications request worker cleanup. Linux uses pressure-stall information
+(PSI), through notifications or sampled stall counters. Workers release inactive
+images and derived views. Prefetch stops for the affected selection.
 
-Allocation checks use current available memory. Linux includes MemAvailable,
-cgroup v2 ancestor limits and concurrent decode reservations. These checks cannot
-guarantee allocation success.
+Before allocating, Yekk checks current available memory. Linux includes system
+MemAvailable, container or cgroup limits, and concurrent decode reservations.
+Other processes can consume memory after the check, so allocation can still fail.
 
-After allocation failure, workers release inactive history and intermediate
-storage, then retry once. They keep the active source and last valid display.
+After failure, workers release inactive images and intermediate storage, then
+retry once. They keep the active source and last valid display.
 An exhausted retry reports an error. Source watching also avoids repeated
 attempts on an unchanged corrupt file.
 
-Live pixel storage is not kernel-discardable. Reclaiming it requires cache removal.
-See [validation](validation.md) for reuse and recovery checks.
+Live pixels are not marked discardable. The OS cannot discard them on request
+without Yekk first removing the cache entry. See [validation](validation.md) for
+reuse and recovery checks.
