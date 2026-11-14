@@ -1,79 +1,50 @@
 # Viewport presentation
 
-Yekk retains the decoded, orientation-correct source and prepares a color-managed
-viewport on a worker. Only viewport-sized display surfaces are required, so full source
-dimensions do not depend on a single GPU texture's maximum size. Image decoding remains
-on the CPU.
+Workers render a color-managed viewport from retained decoded pixels.
+Display surfaces cover the viewport, so source dimensions can exceed GPU
+texture limits. Image decoding runs on the CPU.
 
-## Shared model
+## Coordinates and color
 
-Transforms map source pixels to drawable backing pixels, including scale, rotation,
-mirroring, pan and pixel-aligned actual size. Actual size means one source pixel per
-backing pixel, independently of logical UI scale. Source precision and ICC profiles
-remain attached to the cached image.
+Transforms map source pixels to display backing pixels. They include scale,
+rotation, mirroring and pan. Actual size maps one source pixel to one backing
+pixel, independently of UI scale.
 
-Filtering and alpha composition use linear-light, premultiplied values. Floating-point
-working storage supports these calculations. Display output is SDR. The surrounding
-canvas is separate from projected image edges. View keys include rendering inputs and
-output-profile generation, preventing reuse across incompatible transforms or display
-profiles.
-
-Automatic fitted views and the most recent interaction view have separate cache roles.
-Manual zoom preserves fit. An exact cached view needs no source decoding or viewport
-rendering. A new pan position can require viewport rendering. Workers publish immutable
-completed outputs, and only a matching current request can replace the display. Old
-valid pixels remain visible while work is pending.
+Filtering and alpha composition use linear-light, premultiplied values.
+Output is SDR. Source precision and ICC profiles remain attached to the image.
+View keys include the output-profile generation. See [view reuse](cache-and-pressure.md#reuse-and-prefetch).
 
 ## macOS
 
-A shared Core Image context is initialized on a render worker using the system's
-selected Metal device. When available, the device's recommended working-set size
-controls the Core Image render-task budget. The image cache has no corresponding limit.
-Each source creates its CIImage once.
+A worker creates a shared Core Image context on the system-selected Metal device.
+The device's recommended working-set size guides its render-task budget.
+Each loaded image creates its CIImage once.
 
-Intermediate processing uses 32-bit float in extended linear sRGB. The GPU path renders
-to a half-float IOSurface and waits for completion on the worker before publication.
-Core Animation receives the surface directly. A read-only CGImage provider pins the same
-storage for inspection and cache ownership, avoiding an eager whole-source bitmap
-conversion during UI commit.
+Processing uses 32-bit float in extended linear sRGB. The GPU renders to a
+half-float IOSurface. The worker waits for completion before publication.
+Core Animation receives the surface directly. A read-only CGImage provider
+holds the same storage for inspection and caching.
 
-The provider owns the surface reference and read lock. Published surfaces and native
-layer contents hold separate references to storage. Workers release the final storage
-reference. Source invalidation or session close cannot release an in-flight job's
-pixels. If shared rendering is unavailable, the renderer uses a completed CGImage. The
-software renderer uses the same interface.
+The provider owns a surface reference and read lock. Native layers hold separate
+references. Workers release final storage references. Jobs retain source pixels
+through invalidation or close. If shared rendering fails, the renderer returns
+a completed CGImage. Software rendering uses the same fallback.
 
-Intermediate caches can be cleared under pressure without clearing them on normal
-navigation.
-
-There are two startup-owned job records per window and one replaceable desired view. At
-most two renders run globally, including one speculative render, with one render owner
-per source. Foreground admission takes priority. The main queue can present a ready
-cache hit while another render is active.
+Each window has two startup-owned job records and one replaceable desired view.
+The main queue can display ready hits during another render. Pressure clears
+intermediate caches on workers.
 
 ## Linux
 
-libvips and LittleCMS supply decoding and color operations around the shared TIFF path.
-The renderer keeps native samples and dyadic reductions. General filtered output uses
-linear-light working values. Eligible integer-aligned opaque sRGB views use direct
-conversion. See [performance techniques](performance.md).
+SDL GPU/Vulkan presents worker-prepared viewport textures. Workers finish uploads
+before reusing staging storage. The UI copies to an available swapchain image.
+If none is available, it retries later. SDL's renderer is the fallback.
+Use `--software` to select software rendering.
 
-SDL GPU/Vulkan is the preferred presentation path. Workers prepare and upload viewport
-textures, waiting before reusing staging storage. The UI submits a copy when a swapchain
-image is available and retries later otherwise. If GPU presentation is unavailable, Yekk
-uses SDL's renderer. Use `--software` to select software rendering.
+Readers and the compositor must release leased buffers before reuse.
+Monitor or profile changes queue worker-side transform replacement.
+Generation checks reject old frames. Invalid or missing profiles use sRGB.
+See [rendering techniques](performance.md#viewport-rendering).
 
-Frame storage distinguishes owned, native-referenced and reusable leased buffers. A
-buffer cannot be reused until its readers and compositor ownership end. A monitor or
-profile change queues transform replacement on a worker. Output-generation checks reject
-frames prepared with the old transform. Missing or invalid profiles fall back to sRGB.
-
-## Validation boundaries
-
-Check source samples separately from display output. Fixtures exercise precision,
-orientation, ICC, alpha, nearest and filtered scaling, pixel alignment and exact surface
-reuse. A native presentation submission does not identify when a frame becomes visible.
-Heartbeat gaps measure event-loop availability. They do not measure hardware input
-latency. Drivers and compositors can still introduce latency inside native calls.
-
-See [validation](validation.md) for regression and profiling commands.
+Native calls can still incur driver or compositor delays.
+See [validation](validation.md) for color, lifetime and timing checks.

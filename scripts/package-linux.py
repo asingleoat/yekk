@@ -118,11 +118,12 @@ environment = {key: value for key, value in os.environ.items()
 check = subprocess.run([str(launcher), '--version'], env=environment, capture_output=True, text=True, check=True)
 manifest['version_output'] = check.stdout.strip()
 (tree / 'release.json').write_text(json.dumps(manifest, indent=2) + '\n')
-(tree / 'README.txt').write_text('''Run ./yekk [image or directory]. Keep the lib, libexec and share folders together.
-On NixOS, run: steam-run ./yekk [image or directory]
-The host provides its graphics drivers and X11/Wayland desktop libraries.
-The bundled loader/runtime avoids requiring a particular host glibc release.
-Source and reproducible build recipes: https://github.com/asingleoat/yekk
+(tree / 'README.txt').write_text('''Run ./yekk [image or directory].
+On NixOS, run steam-run ./yekk [image or directory].
+Keep lib, libexec and share beside the launcher.
+The archive includes the glibc loader and runtime.
+Graphics drivers and desktop services come from the host.
+Source and build instructions: https://github.com/asingleoat/yekk
 ''')
 archive = out / (tree.name + '.tar.gz')
 with tarfile.open(archive, 'w:gz') as stream:

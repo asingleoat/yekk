@@ -1,9 +1,6 @@
-# Validation and measurement
+# Testing and measurement
 
-Keep regression fixtures and reusable test/profiling tools in the repository. Write raw
-measurements, captures, profiles and local qualification reports under ignored `dist/`
-paths. Documentation describes current techniques and contracts. Results from one
-machine do not guarantee product performance.
+Store local reports, captures and profiles under ignored `dist/` paths.
 
 ## Core checks
 
@@ -15,20 +12,14 @@ sh scripts/catalog-test.sh
 python3 scripts/supervisor-test.py
 ```
 
-Unit and decoder checks cover validated options, view math, navigation, cache policy,
-source identity, hooks and file-list output. TIFF fixtures exercise exact 16-bit
-samples, both byte orders, strips/tiles, clipped edges and all eight orientations.
-Compare whole output including padding across worker counts and native/SIMD predictors.
-Validate malformed, truncated and unsupported inputs, checked dimensions, allocation
-failure and independent native references.
+Fixtures cover parsing, navigation, cache policy, hooks, file lists and decoding.
+TIFF checks include both byte orders, all orientations, strips, tiles and clipped
+edges. Compare complete samples and padding across workers and predictors.
+Check malformed input, allocation failure and retained native references.
 
-Use `-Ddebug-allocator=true` to detect owned allocation/lifetime errors. Check
-allocation balance. Check for zero live owned bytes at exit. Use separate tools to check
-native frameworks and codecs. Closing, cancellation and partial failure must join
-helpers and retire every frame lease. Exercise saturated retirement queues as well as
-ordinary delivery.
-
-Avoid tests that merely reproduce an implementation detail.
+Use `-Ddebug-allocator=true` for lifetime checks. Check balanced owned allocations
+and zero live owned bytes at exit. Native library allocations need separate tools.
+Exercise cancellation, partial failure, pending frames and full release queues.
 
 ## macOS
 
@@ -41,13 +32,10 @@ zig build -Doptimize=ReleaseSafe -Ddebug-allocator=true --prefix zig-out-debug
 python3 scripts/stability.py --output dist/stability.json
 ```
 
-The GPU checks complement software fixtures for color, alpha, scaling, ownership and
-prepared surfaces. Supervised integration checks exercise rapid navigation, independent
-windows, source replacement, shell hooks and persistent file lists. Stability runs
-alternate speculative prefetch availability and inject failure without forcing
-system-wide memory pressure. Source-write tests use temporary copies. Physical monitor,
-minimum-OS and native Intel coverage remain separate from software fixtures or Rosetta
-execution.
+GPU fixtures check color, alpha, scaling and surface ownership.
+Integration tests cover navigation, windows, hooks, file lists and source changes.
+Stability tests inject failures and vary prefetch availability.
+Tests that write source files use temporary copies.
 
 ## Linux
 
@@ -62,27 +50,21 @@ python3 scripts/wayland-validation.py --parity --scale 2 --output dist/wayland-s
 python3 scripts/linux-memory-test.py
 ```
 
-Desktop tests provide private Xvfb/window-manager/D-Bus or Weston sessions. Portal mode
-(`--dialog-driver portal`) adds private portal services. Checks include chooser
-lifetime, independent windows, escaped drops, key/pointer input, ICC changes and
-geometry. Memory tests require a systemd user manager and apply an isolated test-only
-cgroup limit to reject a sparse oversized image before allocation. They do not fill host
-RAM. Private desktop tests do not substitute for physical HiDPI, monitor changes,
-hardware Wayland or additional GPU/driver coverage.
+Desktop tests use private Xvfb/D-Bus or Weston sessions. Portal tests accept
+`--dialog-driver portal`. Memory tests require a systemd user manager and apply
+a private cgroup limit. They reject oversized images without filling host RAM.
 
-Every graphical invocation uses `scripts/supervise.py` for deadlines, process-group
-cleanup and recursive-viewer detection. Automated keyboard/pointer injection is confined
-to private displays. Decoder-only tools do not open windows.
+GUI tests use `scripts/supervise.py` for deadlines and process-group cleanup.
+Inject keyboard and pointer input only into private displays.
+Test physical monitors, hardware compositors and GPU drivers separately.
 
 ## Benchmarking and profiling
 
-Finish compilation and packaging before collecting timings. Record source and executable
-hashes, toolchain, architecture, image layout/size, viewport backing size, scale, worker
-count and relevant flags. Keep full-resolution source data read-only. Run profiling and
-checksum/capture diagnostics separately from timing trials so their overhead does not
-contaminate comparisons.
+Finish builds before timing. Keep source images read-only.
+Record binary/source hashes, toolchain, architecture, image layout, backing size,
+scale and worker count. Run profilers and capture diagnostics separately.
 
-On macOS, the decoder benchmark can be built and run with:
+On macOS:
 
 ```sh
 zig build build-bench-image -Doptimize=ReleaseSafe
@@ -92,28 +74,21 @@ python3 scripts/compare-predictor.py /path/to/scan.tif --output dist/predictor.j
 python3 scripts/supervise.py ./zig-out/bin/yekk --benchmark-pan --fit actual /path/to/scan.tif
 ```
 
-The Linux build supplies its own `build-bench-image` backend. Headless render, pan and
-zoom modes measure preparation. Supervised viewer tests also include UI publication. Use
-`scripts/compare-viewport.py` for saved-image comparisons and platform profilers for CPU
-stacks, allocation traffic and native/driver behavior.
+Linux supplies its own `build-bench-image` backend. Headless modes measure
+preparation. Viewer tests include UI publication. Use `scripts/compare-viewport.py`
+for saved-image comparisons.
 
-Distinguish filesystem-warm, decoded-cache and prepared-view hits. A priming read is not
-a cold-storage experiment. Fresh APFS clone inodes and uncached file flags do not
-eliminate device or controller caches. Record actual read-byte counts for storage
-measurements. Do not flush the host's global caches.
+Separate filesystem-warm, decoded-cache and prepared-view results.
+Priming reads, fresh APFS clones and uncached flags do not prove cold storage.
+Record actual read bytes. Do not flush host caches.
 
-Host noise generally prolongs execution. Use minimum times or lower envelopes to
-estimate throughput without interference. Report interactive frame tail latency
-separately. For close changes, preselect warmup and sample counts, randomize matched
-ABBA/BAAB blocks, and include an identical-binary control. `scripts/bench-compare.py`
-executes JSON plans and `scripts/bench-analyze.py` analyzes paired block results. Check
-order effects, autocorrelation and clock resolution.
+Use minimum times or lower envelopes to estimate throughput without host noise.
+Report frame tail latency separately. For close comparisons, fix warmup and sample
+counts before testing. Use randomized ABBA/BAAB blocks and an identical-binary
+control. Check order effects, autocorrelation and clock resolution.
+Keep slow samples and complete the planned trials.
 
-Keep slow samples. Complete the planned sample count before you compare results.
-Inconclusive differences stay inconclusive.
-
-A minimal comparison plan uses the same image, view size and workers for both binaries.
-Save this locally as `dist/plan.json`, changing paths as needed:
+Save a comparison plan as `dist/plan.json`:
 
 ```json
 {
@@ -134,12 +109,8 @@ python3 scripts/bench-compare.py --plan dist/plan.json --blocks 24 --output dist
 python3 scripts/bench-analyze.py dist/comparison.json --output dist/analysis.json
 ```
 
-Count decodes, prepared hits and allocations alongside latency. Establish that both
-navigation targets are resident before asserting zero warm redecodes. Measure decode,
-conversion, viewport preparation, upload and commit separately. A native commit
-timestamp is not a visible frame, and a heartbeat is not measured hardware input
-latency. Repeat representative formats, orientations and view sizes before generalizing
-a local improvement.
-
-For portability and mounted/extracted-package checks, see [release
-preparation](release.md).
+Count decodes, prepared hits and allocations alongside time.
+Confirm navigation targets are resident before asserting zero redecodes.
+Measure decode, conversion, preparation, upload and commit separately.
+A commit timestamp does not identify a visible frame. A heartbeat does not measure
+hardware input latency. See [package checks](release.md).
