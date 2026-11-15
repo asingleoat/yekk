@@ -50,6 +50,22 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
         @memcpy(result.format[0..3], "jxl");
         return 0;
     }
+    if (std.meta.activeTag(file.format) == .png) {
+        const plan = @import("png").Plan.read(file, null) catch return -1;
+        const size = plan.extent();
+        result.* = .{ .width = size.width, .height = size.height, .bits = if (plan.header.depth == 16) 16 else 8 };
+        @memcpy(result.format[0..3], "png");
+        return 0;
+    }
+    if (std.meta.activeTag(file.format) == .jpeg) {
+        const plan = @import("jpeg").Plan.read(file, null) catch return -1;
+        if (!plan.native) {
+            const size = plan.extent();
+            result.* = .{ .width = size.width, .height = size.height, .bits = 8 };
+            @memcpy(result.format[0..4], "jpeg");
+            return 0;
+        }
+    }
     const candidate = if (std.meta.activeTag(file.format) == .pnm) @import("pnm").Plan.open(std.mem.span(path), null) catch return -1 else null;
     if (candidate) |plan| {
         defer plan.deinit();
@@ -74,11 +90,9 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
     return 0;
 }
 pub fn formats() void {
-    inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm", ".jxl" }) |suffix| _ = c.puts(suffix);
+    inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm", ".jxl", ".png", ".jpg", ".jpeg", ".jpe", ".jfif" }) |suffix| _ = c.puts(suffix);
     // Report enabled image readers, rather than every installed native plugin.
     inline for (.{
-        .{ "jpegload_source", .{ ".jpg", ".jpeg", ".jpe", ".jfif" } },
-        .{ "pngload_source", .{".png"} },
         .{ "tiffload_source", .{ ".tif", ".tiff" } },
         .{ "gifload_source", .{".gif"} },
         .{ "webpload_source", .{".webp"} },
@@ -86,7 +100,9 @@ pub fn formats() void {
     }) |entry| {
         if (c.vips_operation_new(entry[0])) |operation| {
             defer t.unref(operation);
-            if (c.vips_operation_get_flags(operation) & (c.VIPS_OPERATION_BLOCKED | c.VIPS_OPERATION_UNTRUSTED) == 0) inline for (entry[1]) |suffix| { _ = c.puts(suffix); };
+            if (c.vips_operation_get_flags(operation) & (c.VIPS_OPERATION_BLOCKED | c.VIPS_OPERATION_UNTRUSTED) == 0) inline for (entry[1]) |suffix| {
+                _ = c.puts(suffix);
+            };
         }
     }
 }
@@ -255,6 +271,31 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
 pub fn loadOpened(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]const u8, file: source_file.Open, load_options: LoadOptions) !Loaded {
     const owner_offset = std.mem.alignForward(usize, prefix_bytes, 64);
     const kind = std.meta.activeTag(file.format);
+    if (kind == .jpeg) {
+        const plan = try @import("jpeg").Plan.read(file, load_options.cancel);
+        if (!plan.native) {
+            const workers = try acquireWorkers(1, load_options);
+            defer _ = busy_workers.fetchSub(workers, .release);
+            const options: @import("jpeg").Options = .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .cancel = load_options.cancel, .raw_retirement = !build_options.debug_allocator };
+            const bytes = try plan.storageBytes(options);
+            try reserveTemporary(bytes);
+            defer releaseTemporary(bytes);
+            return wrapProfiled(try plan.decode(allocator, options), allocator, owner_offset, true, plan.gray);
+        }
+    }
+    if (kind == .png) {
+        const plan = try @import("png").Plan.read(file, load_options.cancel);
+        if (!plan.native_color and !plan.animated) {
+            const workers = try acquireWorkers(1, load_options);
+            defer _ = busy_workers.fetchSub(workers, .release);
+            const options: @import("png").Options = .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .cancel = load_options.cancel, .raw_retirement = !build_options.debug_allocator };
+            const bytes = try plan.storageBytes(options);
+            try reserveTemporary(bytes);
+            defer releaseTemporary(bytes);
+            const decoded = try plan.decode(allocator, options);
+            return wrapProfiled(decoded, allocator, owner_offset, plan.opaqueSource(), if (plan.profile) |profile| profile.gray else false);
+        }
+    }
     if (kind == .jxl) {
         const workers = try acquireWorkers(decode_workers, load_options);
         defer _ = busy_workers.fetchSub(workers, .release);
@@ -308,16 +349,24 @@ pub fn loadOpened(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]
     return .{ .prefix = @ptrCast(slab.ptr), .pixels = pixels };
 }
 fn wrapJxl(result: jxl.Result, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
+    return wrapProfiled(result.decoded, allocator, owner_offset, result.opaque_source, result.gray_source);
+}
+fn wrapProfiled(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize, opaque_source: bool, gray_source: bool) !Loaded {
     var owned = true;
-    errdefer if (owned) result.decoded.deinit();
-    const data = result.decoded.profile;
+    errdefer if (owned) decoded.deinit();
+    const data = decoded.profile;
+    if (data.len == 0) {
+        owned = false;
+        return wrapDecodedWithAttributes(decoded, allocator, owner_offset, opaque_source, false);
+    }
+    if (data.len > std.math.maxInt(u32)) return error.NativeImageFailed;
     const profile = c.cmsOpenProfileFromMem(data.ptr, @intCast(data.len)) orelse return error.NativeImageFailed;
     defer _ = c.cmsCloseProfile(profile);
     const colour = c.cmsGetColorSpace(profile);
     const gray = colour == c.cmsSigGrayData;
-    if (colour != c.cmsSigRgbData and !(result.gray_source and gray)) return error.NativeImageFailed;
+    if (colour != c.cmsSigRgbData and !(gray_source and gray)) return error.NativeImageFailed;
     owned = false;
-    return wrapDecodedWithAttributes(result.decoded, allocator, owner_offset, result.opaque_source, gray);
+    return wrapDecodedWithAttributes(decoded, allocator, owner_offset, opaque_source, gray);
 }
 fn wrapDecoded(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
     return wrapDecodedWithAttributes(decoded, allocator, owner_offset, true, false);
@@ -325,6 +374,7 @@ fn wrapDecoded(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset
 fn wrapDecodedWithAttributes(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize, opaque_source: bool, gray_profile: bool) !Loaded {
     var owned = true;
     errdefer if (owned) decoded.deinit();
+    if (decoded.order != .rgba) return error.NativeImageFailed;
     const resident = c.vips_image_new_from_memory(decoded.pixels.ptr, decoded.pixels.len, @intCast(decoded.width), @intCast(decoded.height), 4, if (decoded.bits_per_component == 16) c.VIPS_FORMAT_USHORT else c.VIPS_FORMAT_UCHAR) orelse return error.OutOfMemory;
     errdefer t.unref(resident);
     const owner: *Owner = @ptrCast(@alignCast(decoded.slab[owner_offset..].ptr));

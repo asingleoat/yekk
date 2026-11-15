@@ -40,6 +40,23 @@ The decoder selects sample width, channel count and sample-range conversion
 before entering pixel loops. Full-range 8-bit and 16-bit samples need no scaling.
 Other ranges use checked integer scaling. Header probing does not decode pixels.
 
+## PNG and JPEG decoding
+
+PNG header parsing plans one allocation for pixels, ICC data, compressed input
+and filter buffers. The decoder reads IDAT payloads directly into that storage
+and checks CRCs during the read. libdeflate expands the zlib stream. Zig restores
+row filters and expands samples to RGBA without a separate full-file copy.
+The common RGB8 path selects its pixel layout outside the pixel loop.
+
+Linux loads ordinary JPEGs through libjpeg-turbo directly. Zig stores compressed
+input, pixels, ICC data and orientation buffers in one allocation. The native
+decoder does not retain another copy of Exif or ICC data. Rotated output uses
+small cache tiles. macOS keeps ImageIO for JPEG.
+
+These paths reuse the worker queues and decoded-image cache. They do not add
+decode work to the UI thread. Production can return completed temporary-buffer
+pages to the OS while retaining decoded pixels.
+
 ## SIMD prediction
 
 TIFF Predictor 2 stores differences between adjacent samples of the same channel.

@@ -32,6 +32,8 @@ if a.cjpeg:
     pixels = bytes(channel for y in range(48) for x in range(64) for channel in (x * 4, y * 5, (x + y) * 2))
     result = subprocess.run([str(a.cjpeg), '-progressive', '-quality', '90'], input=b'P6\n64 48\n255\n' + pixels, check=True, capture_output=True)
     (fixtures / 'jpeg-progressive.jpg').write_bytes(result.stdout)
+    result = subprocess.run([str(a.cjpeg), '-quality', '90'], input=b'P5\n3 2\n255\n' + bytes([0, 37, 127, 128, 200, 255]), check=True, capture_output=True)
+    (fixtures / 'jpeg-gray.jpg').write_bytes(result.stdout)
 
 # BMP variants exercise independent SDL and ImageIO decoders with identical RGB.
 def bmp(width, height, bits, pixels, palette=b'', masks=b'', compression=0, dib=40, colour=0, profile=b''):

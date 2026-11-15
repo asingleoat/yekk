@@ -2600,3 +2600,17 @@ test "direct JPEG XL preserves precision, alpha, orientation and one owned slab"
     var cancel: std.atomic.Value(bool) = .init(true);
     try std.testing.expectError(error.Cancelled, decodeScheduled("tests/fixtures/jxl-rgb8.jxl", std.testing.allocator, .{ .cancel = &cancel }));
 }
+
+test "direct PNG and JPEG providers retain ICC, sample precision and a single owner" {
+    try initTestDecoder();
+    inline for (.{ "png-profile-srgb.png", "png-profile-gray.png", "jpeg-profile-srgb.jpg", "jpeg-profile-gray.jpg" }) |name| {
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decodeWithAllocator("tests/fixtures/" ++ name, counted.allocator());
+        try std.testing.expectEqual(@as(usize, 1), counted.alloc_index);
+        try std.testing.expectEqual(@as(u32, if (comptime std.mem.startsWith(u8, name, "png")) 16 else 8), image.pixels.bits);
+        const displayed = try testRenderedPixel(image, 0);
+        try std.testing.expectEqual(@as(u8, 255), displayed[3]);
+        image.destroy();
+        try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    }
+}

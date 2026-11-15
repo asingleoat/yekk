@@ -44,22 +44,67 @@ test "PNM native providers retain the shared decoder's precision and single slab
 }
 
 test "contents identify a PNG with an unrelated extension, including alpha" {
-    const image = try decoder.load("tests/fixtures/alpha.content", 1000);
-    defer image.destroy();
-    try std.testing.expectEqual(@as(u32, 3), image.source_width);
-    try std.testing.expectEqual(@as(u32, 2), image.source_height);
-    try std.testing.expectEqual(@as(u32, 3), image.width);
-    try std.testing.expect(image.decoded_bytes >= 3 * 2 * 4);
-    var pixels: [24]u8 = @splat(0);
-    const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB).?;
-    defer n.CFRelease(space);
-    const context = n.CGBitmapContextCreate(&pixels, 3, 2, 8, 12, space, 0x4001).?; // RGBA premultiplied, byte-order big
-    defer n.CFRelease(context);
-    n.CGContextDrawImage(context, n.rect(0, 0, 3, 2), image.native);
-    var alpha: [6]u8 = undefined;
-    for (&alpha, 0..) |*a, i| a.* = pixels[i * 4 + 3];
-    std.mem.sort(u8, &alpha, {}, std.sort.asc(u8));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255, 255, 255 }, &alpha);
+    for ([_]u32{ 0, 1000 }) |edge| {
+        const image = try decoder.load("tests/fixtures/alpha.content", edge);
+        defer image.destroy();
+        try std.testing.expectEqual(@as(u32, 3), image.source_width);
+        try std.testing.expectEqual(@as(u32, 2), image.source_height);
+        try std.testing.expectEqual(@as(u32, 3), image.width);
+        try std.testing.expect(image.decoded_bytes >= 3 * 2 * 4);
+        var pixels: [24]u8 = @splat(0);
+        const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB).?;
+        defer n.CFRelease(space);
+        const context = n.CGBitmapContextCreate(&pixels, 3, 2, 8, 12, space, 0x4001).?; // RGBA premultiplied, byte-order big
+        defer n.CFRelease(context);
+        n.CGContextDrawImage(context, n.rect(0, 0, 3, 2), image.native);
+        var alpha: [6]u8 = undefined;
+        for (&alpha, 0..) |*a, i| a.* = pixels[i * 4 + 3];
+        std.mem.sort(u8, &alpha, {}, std.sort.asc(u8));
+        try std.testing.expectEqualSlices(u8, &.{ 0, 128, 255, 255, 255, 255 }, &alpha);
+    }
+}
+
+test "shared PNG providers preserve 16-bit pixels, orientation and a single allocation" {
+    inline for (.{ "png-2-16-1.png", "png-orientation6-le.png", "png-profile-srgb.png" }) |name| {
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decoder.loadWithAllocator("tests/fixtures/" ++ name, 0, counted.allocator());
+        try std.testing.expectEqual(decoder.Backend.png, image.backend);
+        try std.testing.expectEqual(@as(usize, 1), counted.alloc_index);
+        if (comptime std.mem.indexOf(u8, name, "orientation") != null) {
+            try std.testing.expectEqual(@as(u32, 2), image.width);
+            try std.testing.expectEqual(@as(u32, 3), image.height);
+        } else {
+            const first: [*]const u16 = @ptrCast(@alignCast(image.ownedPixels().?.ptr));
+            try std.testing.expectEqualSlices(u16, &.{ 37, 1274, 2511 }, first[0..3]);
+        }
+        image.destroy();
+        try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+    }
+    const native = try decoder.load("tests/fixtures/png-gamma.png", 0);
+    defer native.destroy();
+    try std.testing.expectEqual(decoder.Backend.image_io, native.backend);
+}
+
+test "shared PNG samples match ImageIO in an unscaled sRGB bitmap" {
+    inline for (.{ "png-0-1-0.png", "png-0-8-0.png", "png-0-16-0-trns.png", "png-2-8-0.png", "png-2-16-0-trns.png", "png-4-16-0.png", "png-6-16-0.png", "png-profile-srgb.png" }) |name| {
+        const owned = try decoder.load("tests/fixtures/" ++ name, 0);
+        defer owned.destroy();
+        const reference = try decoder.load("tests/fixtures/" ++ name, 1000);
+        defer reference.destroy();
+        const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB).?;
+        defer n.CFRelease(space);
+        var ours: [17 * 19 * 4]u8 = @splat(0);
+        var theirs: [17 * 19 * 4]u8 = @splat(0);
+        for ([_]struct { native: n.Ref, bytes: []u8 }{ .{ .native = owned.native, .bytes = &ours }, .{ .native = reference.native, .bytes = &theirs } }) |value| {
+            const context = n.CGBitmapContextCreate(value.bytes.ptr, 17, 19, 8, 17 * 4, space, 0x4001).?;
+            defer n.CFRelease(context);
+            n.CGContextDrawImage(context, n.rect(0, 0, 17, 19), value.native);
+        }
+        var difference: usize = 0;
+        for (ours, theirs) |a, b| difference = @max(difference, @abs(@as(i16, a) - b));
+        if (difference > 1) std.debug.print("PNG {s}: bitmap difference {d}; source bits {d}/{d}\n", .{ name, difference, owned.bits_per_component, reference.bits_per_component });
+        try std.testing.expect(difference <= 1);
+    }
 }
 
 test "downsampling does not masquerade as full detail" {

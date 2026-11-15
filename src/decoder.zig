@@ -27,21 +27,21 @@ pub fn load(path: []const u8, max_pixel: u32) Failure!*Image {
 /// "complete". Validate container completeness before asking it for pixels.
 /// This is container validation, not a second decoder. O_NONBLOCK prevents
 /// a named pipe from tying up a worker indefinitely during open.
-fn preflight(path: []const u8, completeness: bool) Failure!std.meta.Tag(@import("source").Format) {
+fn preflight(path: []const u8, completeness: bool) Failure!@import("source").Open {
     var buffer: [4096:0]u8 = undefined;
     if (path.len == 0 or path.len >= buffer.len or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnreadableImage;
     @memcpy(buffer[0..path.len], path);
     buffer[path.len] = 0;
-    const source = try @import("source").open(buffer[0..path.len :0], completeness);
-    defer source.close();
-    return std.meta.activeTag(source.format);
+    return @import("source").open(buffer[0..path.len :0], completeness);
 }
 
 pub fn loadWithAllocator(path: []const u8, max_pixel: u32, allocator: std.mem.Allocator) Failure!*Image {
     return loadWithLimits(path, max_pixel, allocator, .{});
 }
 pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Allocator, limits: Limits) Failure!*Image {
-    const source_format = try preflight(path, true);
+    const opened = try preflight(path, true);
+    defer opened.close();
+    const source_format = std.meta.activeTag(opened.format);
     if (source_format == .tiff and max_pixel == 0) if (try @import("tiff_decoder.zig").load(path, allocator, limits)) |decoded| return decoded;
     if (source_format == .pnm) {
         const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
@@ -50,6 +50,22 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
         defer n.CFRelease(space);
         const decoded = try plan.decode(allocator, .{ .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .workers = if (limits.tiff_workers == 0) n.performanceCores() else limits.tiff_workers });
         return @import("tiff_decoder.zig").fromDecoded(decoded, space, .pnm);
+    }
+    if (source_format == .png and max_pixel == 0) {
+        const plan = try @import("png").Plan.read(opened, limits.cancel);
+        // Retain native colorimetry and 16-bit transparency behavior. Gray ICC
+        // sources also keep their native gray pixel/color-space pairing.
+        if (!plan.native_color and !plan.animated and !(plan.profile != null and plan.profile.?.gray) and !(plan.header.depth == 16 and !plan.opaqueSource())) {
+            // Match ImageIO's opaque RGB8 layout. Core Image filters RGBX and
+            // XRGB edges differently; write XRGB directly instead of swizzling.
+            const decoded = try plan.decode(allocator, .{ .order = if (plan.header.depth != 16 and plan.opaqueSource()) .argb else .rgba, .prefix_bytes = @sizeOf(Image), .row_alignment = 64, .raw_retirement = limits.raw_retirement, .cancel = limits.cancel });
+            const space = pngSpace(decoded) catch |err| {
+                decoded.deinit();
+                return err;
+            };
+            defer n.CFRelease(space);
+            return @import("tiff_decoder.zig").fromDecodedWithAlpha(decoded, space, .png, !plan.opaqueSource());
+        }
     }
     const url = n.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse return error.UnreadableImage;
     defer n.CFRelease(url);
@@ -119,6 +135,18 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     return image;
 }
 
+fn pngSpace(decoded: @import("png").Decoded) Failure!n.Ref {
+    if (decoded.profile.len == 0) return n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse error.OutOfMemory;
+    const data = n.CFDataCreate(null, decoded.profile.ptr, @intCast(decoded.profile.len)) orelse return error.OutOfMemory;
+    defer n.CFRelease(data);
+    const space = n.CGColorSpaceCreateWithICCData(data) orelse return error.DecodeFailed;
+    if (n.CGColorSpaceGetModel(space) != 1) {
+        n.CFRelease(space);
+        return error.DecodeFailed;
+    }
+    return space;
+}
+
 /// Header-only metadata. No pixel decode or Yekk allocation; worker/CLI use.
 pub const Metadata = struct {
     width: u32,
@@ -127,7 +155,15 @@ pub const Metadata = struct {
     format_len: usize = 0,
 };
 pub fn metadata(path: []const u8) Failure!Metadata {
-    const source_format = try preflight(path, false);
+    const opened = try preflight(path, false);
+    defer opened.close();
+    const source_format = std.meta.activeTag(opened.format);
+    if (source_format == .png) {
+        const plan = try @import("png").Plan.read(opened, null);
+        var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height, .format_len = 3 };
+        @memcpy(result.format[0..3], "png");
+        return result;
+    }
     if (source_format == .pnm) {
         const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
         defer plan.deinit();

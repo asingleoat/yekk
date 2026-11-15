@@ -44,6 +44,9 @@ pub fn storageLayout(width: usize, height: usize, scratch: usize, workers: usize
 
 /// Takes ownership on both success and failure; the provider retains the slab.
 pub fn fromDecoded(decoded: shared.Decoded, space: n.Ref, backend: model.Backend) model.Failure!*model.Image {
+    return fromDecodedWithAlpha(decoded, space, backend, false);
+}
+pub fn fromDecodedWithAlpha(decoded: shared.Decoded, space: n.Ref, backend: model.Backend, alpha: bool) model.Failure!*model.Image {
     var provider_owns = false;
     errdefer if (!provider_owns) decoded.deinit();
     const image: *model.Image = @ptrCast(decoded.slab.ptr);
@@ -52,6 +55,7 @@ pub fn fromDecoded(decoded: shared.Decoded, space: n.Ref, backend: model.Backend
     const provider = n.CGDataProviderCreateWithData(image, decoded.pixels.ptr, decoded.pixels.len, model.Image.releasePixels) orelse return error.OutOfMemory;
     provider_owns = true;
     defer n.CFRelease(provider);
-    image.native = n.CGImageCreate(decoded.width, decoded.height, decoded.bits_per_component, @as(usize, decoded.bits_per_component) * 4, decoded.row_bytes, space, if (decoded.bits_per_component == 16) 0x1005 else 0x4005, provider, null, true, 0) orelse return error.DecodeFailed;
+    const bitmap: u32 = (if (decoded.bits_per_component == 16) @as(u32, 0x1000) else if (decoded.order == .argb) @as(u32, 0) else 0x4000) | (if (decoded.order == .argb) (if (alpha) @as(u32, 4) else 6) else if (alpha) @as(u32, 3) else 5);
+    image.native = n.CGImageCreate(decoded.width, decoded.height, decoded.bits_per_component, @as(usize, decoded.bits_per_component) * 4, decoded.row_bytes, space, bitmap, provider, null, true, 0) orelse return error.DecodeFailed;
     return image;
 }

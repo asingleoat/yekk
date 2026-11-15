@@ -1,7 +1,9 @@
 //! Owned decoded pixels. Native providers retain the slab through their last reader.
 const std = @import("std");
 const system = @import("system");
+pub const Order = enum { rgba, argb };
 pub const Decoded = struct {
+    order: Order = .rgba,
     bits_per_component: u8 = 16,
     allocator: std.mem.Allocator,
     slab: []align(64) u8,

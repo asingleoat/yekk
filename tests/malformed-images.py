@@ -54,6 +54,30 @@ with tempfile.TemporaryDirectory(prefix='yekk-invalid-images-') as temporary:
         add(f'dimensions-{width}-{height}.png', png[:8] + chunk(b'IHDR', header) + png[33:], 1)
     for profile in [b'', b'acsp', b'\xff' * 132, b'\0' * 128 + b'\xff' * 4]:
         add(f'icc-{len(corpus)}.png', png[:33] + chunk(b'iCCP', b'profile\0\0' + zlib.compress(profile)) + png[33:])
+    ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0))
+    idat = chunk(b'IDAT', zlib.compress(b'\0\x11\x22\x33\xff'))
+    iend = chunk(b'IEND', b'')
+    start = png[:8] + ihdr
+    for name, data in [
+        ('crc', start + idat[:-1] + bytes([idat[-1] ^ 1]) + iend),
+        ('filter', start + chunk(b'IDAT', zlib.compress(b'\5\x11\x22\x33\xff')) + iend),
+        ('short-output', start + chunk(b'IDAT', zlib.compress(b'\0\x11')) + iend),
+        ('long-output', start + chunk(b'IDAT', zlib.compress(b'\0' * 50)) + iend),
+        ('deflate-trailer', start + chunk(b'IDAT', zlib.compress(b'\0\x11\x22\x33\xff') + b'junk') + iend),
+        ('unknown-critical', start + chunk(b'ABCD', b'') + idat + iend),
+        ('separated-idat', start + idat + chunk(b'tEXt', b'k\0v') + idat + iend),
+        ('duplicate-header', start + ihdr + idat + iend),
+        ('alpha-trns', start + chunk(b'tRNS', b'\0\1') + idat + iend),
+        ('exif-offset', start + chunk(b'eXIf', b'II*\0\xff\xff\xff\xff') + idat + iend),
+        ('exif-count', start + chunk(b'eXIf', b'MM\0*\0\0\0\x08\xff\xff') + idat + iend),
+        ('exif-orientation', start + chunk(b'eXIf', b'II*\0\x08\0\0\0\1\0\x12\1\3\0\1\0\0\0\x09\0\0\0\0\0\0\0') + idat + iend),
+    ]:
+        add('png-' + name + '.png', data, 1)
+    indexed = png[:8] + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 3, 0, 0, 0))
+    add('png-missing-palette.png', indexed + idat + iend, 1)
+    add('png-palette-index.png', indexed + chunk(b'PLTE', b'\x11\x22\x33') + chunk(b'IDAT', zlib.compress(b'\0\1')) + iend, 1)
+    for kind, depth in [(1, 8), (0, 3), (2, 4), (3, 16), (6, 1)]:
+        add(f'png-kind-{kind}-{depth}.png', png[:8] + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, depth, kind, 0, 0, 0)) + idat + iend, 1)
     for marker in [b'\xff\xe1', b'\xff\xe2']:
         for payload in [b'', b'Exif\0\0II*\0\xff\xff\xff\xff', b'ICC_PROFILE\0\1\1' + b'\xff' * 132]:
             segment = marker + struct.pack('>H', len(payload) + 2) + payload

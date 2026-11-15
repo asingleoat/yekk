@@ -19,6 +19,7 @@ let
     stdenv = pkgs.stdenvAdapters.makeStaticLibraries pkgs.stdenv;
   } // overrides)).overrideAttrs { doCheck = false; };
   zlib = static pkgs.zlib {};
+  libdeflate = static pkgs.libdeflate {};
   libjpeg = static pkgs.libjpeg {};
   libpng = static pkgs.libpng { inherit zlib; };
   libwebp = static pkgs.libwebp { inherit libjpeg libpng; tiffSupport = false; };
@@ -60,7 +61,7 @@ let
     ];
     postFixup = "";
   });
-  dependencies = [ sdl3 vips libtiff lcms2 zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ] ++ privateMetadata;
+  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ] ++ privateMetadata;
   sourcePackages = dependencies ++ [ pkgs.glibc pkgs.stdenv.cc.cc pkgs.dejavu_fonts zig ];
   sourceInputs = lib.unique (lib.concatMap (package:
     lib.optional (package ? src && lib.isDerivation package.src) package.src

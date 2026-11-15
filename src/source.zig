@@ -31,12 +31,28 @@ pub fn exists(path: []const u8) bool {
     return files.stat(terminated.ptr, &stat) == 0 or (runtime.errno().* != c.ENOENT and runtime.errno().* != c.ENOTDIR);
 }
 
-pub const Format = union(enum) { other, tiff, pnm, jxl, bmp: @import("bmp").Header };
+pub const Format = union(enum) { other, tiff, pnm, png, jpeg, jxl, bmp: @import("bmp").Header };
+pub const exifOrientation = @import("exif.zig").orientation;
+pub const Orientation = @import("exif.zig").Orientation;
+pub const Range = struct {
+    file: Open,
+    offset: u64,
+    length: usize,
+    pub fn readAt(self: Range, output: []u8, offset: u64) Error!usize {
+        if (offset >= self.length) return 0;
+        return self.file.readAt(output[0..@min(output.len, self.length - @as(usize, @intCast(offset)))], self.offset + offset);
+    }
+};
 pub const Open = struct {
     format: Format = .other,
     fd: c_int,
     stamp: Stamp,
-    pub fn bmp(self: Open) ?@import("bmp").Header { return switch (self.format) { .bmp => |header| header, else => null }; }
+    pub fn bmp(self: Open) ?@import("bmp").Header {
+        return switch (self.format) {
+            .bmp => |header| header,
+            else => null,
+        };
+    }
     pub fn close(self: Open) void {
         _ = c.close(self.fd);
     }
@@ -76,6 +92,8 @@ pub fn open(path: [:0]const u8, completeness: bool) Error!Open {
         try @import("jpeg_container.zig").validate(fd, @intCast(stat.st_size));
     }
     var format: Format = .other;
+    if (count == 8 and std.mem.eql(u8, &signature, "\x89PNG\r\n\x1a\n")) format = .png;
+    if (signature[0] == 0xff and signature[1] == 0xd8) format = .jpeg;
     if (count >= 4 and (std.mem.eql(u8, signature[0..4], "II\x2a\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2a") or std.mem.eql(u8, signature[0..4], "II\x2b\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2b"))) format = .tiff;
     if ((signature[0] == 0xff and signature[1] == 0x0a) or (count == 8 and std.mem.eql(u8, &signature, "\x00\x00\x00\x0cJXL "))) format = .jxl;
     if (signature[0] == 'P' and signature[1] >= '1' and signature[1] <= '6') format = .pnm;

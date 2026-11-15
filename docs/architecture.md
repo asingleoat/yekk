@@ -25,11 +25,14 @@ changes to external state. Platform adapters then read files, update windows or 
 | `actions.zig`, `view_actions.zig` | Actions, key bindings, settings and view changes |
 | `navigation.zig`, `catalog.zig` | Directory discovery, sorting and navigation |
 | `geometry.zig`, `core.zig` | Window geometry and image-position calculations |
-| `source.zig`, `jpeg_container.zig` | File identity and completeness checks |
+| `source.zig`, `jpeg_container.zig`, `exif.zig` | File identity, completeness and bounded orientation metadata |
 | `session_input.zig` | Configuration, key files and image-list files |
 | `hooks.zig`, `hook_execution.zig`, `commands.zig` | Command substitution and child-process execution |
 | `cache.zig`, `sessions.zig`, `memory.zig` | Cache policy, window sessions and allocation counters |
 | `tiff_pixels.zig` | Shared RGB16 TIFF decoding and SIMD prediction |
+| `png.zig`, `pnm.zig` | Shared PNG and Netpbm decoding |
+| `jpeg.zig`, `jxl_pixels.zig` | Direct native JPEG and JPEG XL adapters on Linux |
+| `pixel_storage.zig` | Owned pixel slabs and temporary-buffer reclamation |
 
 macOS uses AppKit, dispatch, ImageIO, Core Image and Core Graphics.
 Linux uses SDL, libvips, LittleCMS and GIO. These APIs differ; shared application
@@ -47,8 +50,9 @@ window slots. These are structural limits, separate from image-cache memory.
 
 Yekk makes one startup allocation and one owned allocation per loaded image
 representation. A representation is a decoded image at a given resolution.
-The TIFF allocation includes pixels, metadata, worker records and temporary
-buffers. Libraries, threads and graphics drivers make separate allocations.
+The TIFF, PNG and direct JPEG allocations include pixels, metadata and temporary
+buffers. TIFF also stores worker records. Libraries, threads and graphics drivers
+make separate allocations.
 
 ## Ownership and lifetime
 

@@ -15,13 +15,23 @@ These checks run in production builds, including ReleaseFast.
   profiles that name an external file. Linux decodes BMP pixels with SDL.
 - Decode PBM, PGM and PPM with shared Zig code. Validate numeric fields and sample
   values, preserve 16-bit samples, and reject incomplete pixel data.
+- Decode PNG chunks, row filters, integer samples, transparency and Adam7
+  interlace with shared Zig code. Check chunk ranges, ordering, CRCs and the exact
+  decompressed size. libdeflate decompresses the pixel stream. Bound Exif offsets
+  to their metadata payload and retain ICC data in the image allocation.
+- Decode ordinary 8-bit JPEG directly with libjpeg-turbo on Linux. Check the
+  dimensions again after reading the source into owned storage. Assemble ICC
+  segments in sequence order and apply Exif orientation. Keep ImageIO for macOS
+  JPEG and the native Linux loader for other JPEG sample formats and color models.
 - Decode JPEG XL directly with libjxl on Linux. Check dimensions, integer sample
   precision, profile size and output buffer size. Join native jobs before freeing
   storage. Use the orientation stored with JPEG XL image data. Ignore a second
   orientation tag in Exif metadata.
 - Disable libvips operations marked as untrusted. Portable Linux packages omit
   ImageMagick and the libvips JPEG XL wrapper. Other image formats use ImageIO
-  or enabled libvips codecs.
+  or enabled libvips codecs. PNG animation and non-ICC colorimetry keep the native
+  path. macOS also keeps native PNG gray profiles, 16-bit transparency, and
+  reduced source representations.
 
 The PNM decoder stores binary input at the end of each worker's output region.
 It expands pixels forward after each source sample has been read. This uses one
@@ -42,6 +52,8 @@ Generate the fixtures, then run the supervised input corpus:
 
 ```sh
 python3 tests/generate-release-fixtures.py
+python3 tests/generate-png-fixtures.py
+python3 tests/generate-jpeg-fixtures.py
 python3 tests/malformed-images.py --binary zig-out/bin/yekk \
   --output dist/malformed-images.json
 ```

@@ -831,6 +831,7 @@ fn start(job: *Job, id: usize, prefetch: bool) bool {
     job.* = .{ .owner = s, .busy = true, .prefetch = prefetch, .id = id, .version = s.cached[id].version, .path = path, .workers = workers, .limits = s.limits, .edge = edge };
     job.limits.tiff_workers = workers;
     job.limits.raw_retirement = !memory.debug_enabled;
+    job.limits.cancel = &s.cancel;
     s.decode_count += 1;
     control.active_decodes += 1;
     control.active_decode_workers += workers;

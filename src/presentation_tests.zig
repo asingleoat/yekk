@@ -73,6 +73,31 @@ test "software viewport rendering preserves oriented RGB16, alpha and P3 profile
     try compareIdentity("tests/fixtures/rgb16-orientation1.tif", true, true);
 }
 
+fn comparePngEdges(software: bool) !void {
+    const pool = objc.AutoreleasePool.init();
+    defer pool.deinit();
+    var renderer: presentation.Renderer = .{ .software = software };
+    defer renderer.deinit();
+    inline for (.{ "png-0-8-0.png", "png-2-8-0.png" }) |name| {
+        const image = try decoder.load("tests/fixtures/" ++ name, 0);
+        defer image.destroy();
+        const reference = try decoder.load("tests/fixtures/" ++ name, 1000);
+        defer reference.destroy();
+        const request: presentation.Request = .{ .width = 96, .height = 64, .transform = .{ .a = 64.0 / 19.0, .b = 0, .c = 0, .d = 64.0 / 19.0, .tx = 19 } };
+        const actual = try renderer.render(image, request, .interaction);
+        const expected = try renderer.render(reference, request, .interaction);
+        var ours: [96 * 64 * 4]u8 = undefined;
+        var theirs: [96 * 64 * 4]u8 = undefined;
+        try rgba8(actual, &ours, 96, 64);
+        try rgba8(expected, &theirs, 96, 64);
+        try std.testing.expectEqualSlices(u8, &theirs, &ours);
+    }
+}
+test "PNG magnification preserves ImageIO edge color and alpha" {
+    try comparePngEdges(true);
+    if (@import("test_options").gpu) try comparePngEdges(false);
+}
+
 test "nearest viewport rendering duplicates pixels without another source allocation" {
     var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
     {
