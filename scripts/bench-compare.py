@@ -32,8 +32,8 @@ comparisons = plan['comparisons']
 if not comparisons or len({c['name'] for c in comparisons}) != len(comparisons):
     parser.error('comparison names must be nonempty and unique')
 for c in comparisons:
-    if c['metric'] not in ['process', 'decode', 'first_fit', 'steady', 'steady_even']:
-        parser.error('metric must be process, decode, first_fit, steady or steady_even')
+    if c['metric'] not in ['process', 'decode', 'load', 'first_fit', 'steady', 'steady_even']:
+        parser.error('metric must be process, decode, load, first_fit, steady or steady_even')
     for key in ['control', 'candidate']:
         c[key] = str(Path(c[key]).resolve(strict=True))
 image = Path(plan['image']).resolve(strict=True)
@@ -106,6 +106,8 @@ def run(c, label):
         samples = [result['process_wall_ms']]
     elif c['metric'] == 'decode':
         samples = [r['wall_ms'] for r in result['records'] if r['mode'] == 'decode']
+    elif c['metric'] == 'load':
+        samples = [r['wall_ms'] for r in result['records'] if r['mode'] in ('load', 'decode')]
     else:
         samples = [r['wall_ms'] for r in frames if (r['step'] == 0 if c['metric'] == 'first_fit' else r['step'] >= 4 and (c['metric'] != 'steady_even' or r['step'] % 2 == 0))]
     if not samples or any(not math.isfinite(x) or x < 0 for x in samples):
@@ -140,7 +142,7 @@ for i in range(args.blocks):
 report = {'started_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'protocol': {'blocks_per_comparison': args.blocks, 'processes_per_block': 4,
                        'seed': args.seed, 'order': 'balanced randomized ABBA/BAAB; comparison order shuffled each round',
                        'warmup': 'one four-process block per comparison, excluded in advance',
-                       'metric': 'process wall time, decode time, first-fit time or median after four warmup frames; steady_even selects even steps only',
+                       'metric': 'process wall time, decode time, eager source load, first-fit time or median after four warmup frames; steady_even selects even steps only',
                        'replication_unit': 'four-process block; frame timings are not independent replicates',
                        'sub_tick_policy': 'per-process median below the reported clock resolution is conservatively floored to that resolution; raw values retained',
                        'stopping': 'fixed in advance; no significance-based stopping or timing exclusions',

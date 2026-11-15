@@ -84,8 +84,9 @@ Worker cancellation and cleanup finish before its window slot becomes available 
 
 Supported source pixels keep 8/16-bit precision and ICC color profiles.
 An ICC profile describes how to interpret the image's color values.
-The shared RGB16 TIFF decoder uses libtiff. Other variants use ImageIO on macOS
-or libvips on Linux.
+The shared RGB16 TIFF decoder uses libtiff. Shared Zig code decodes PBM, PGM
+and PPM. Linux uses SDL for BMP. Other variants use ImageIO on macOS or enabled
+libvips codecs on Linux. See [image input checks](input-safety.md).
 
 Display output is standard dynamic range (SDR). Floating-point calculations
 support filtering and color conversion. HDR and clipboard operations are outside scope.

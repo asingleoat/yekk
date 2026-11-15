@@ -71,7 +71,7 @@ const Releaser = struct {
     items: [32]Retirement = undefined,
     clear_context: bool = false,
 };
-const Stamp = @import("source.zig").Stamp;
+const Stamp = @import("source").Stamp;
 const Watch = struct {
     busy: bool = false,
     count: usize = 0,
@@ -1393,7 +1393,7 @@ fn hookWorker(context: ?*anyopaque) callconv(.c) void {
         s.hook.failure = err;
         break :failed .{};
     };
-    s.hook.exists = @import("source.zig").exists(s.hook.path);
+    s.hook.exists = @import("source").exists(s.hook.path);
     n.dispatch_async_f(n.dispatch_get_main_queue(), s, hookDone);
 }
 fn hookDone(context: ?*anyopaque) callconv(.c) void {

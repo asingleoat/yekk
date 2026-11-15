@@ -11,10 +11,11 @@ pub const Failure = @import("image.zig").Failure;
 pub const Limits = @import("image.zig").Limits;
 pub const Image = @import("image.zig").Image;
 
-fn number(dictionary: n.Ref, key: n.Ref) ?i64 {
+fn number(dictionary: n.Ref, key: n.Ref) Failure!?i64 {
     const value = n.CFDictionaryGetValue(dictionary, key) orelse return null;
+    if (n.CFGetTypeID(value) != n.CFNumberGetTypeID()) return error.InvalidDimensions;
     var result: i64 = 0;
-    if (n.CFNumberGetValue(value, 4, &result) == 0) return null; // kCFNumberSInt64Type
+    if (n.CFNumberGetValue(value, 4, &result) == 0) return error.InvalidDimensions; // kCFNumberSInt64Type
     return result;
 }
 
@@ -26,21 +27,30 @@ pub fn load(path: []const u8, max_pixel: u32) Failure!*Image {
 /// "complete". Validate container completeness before asking it for pixels.
 /// This is container validation, not a second decoder. O_NONBLOCK prevents
 /// a named pipe from tying up a worker indefinitely during open.
-fn preflight(path: []const u8, completeness: bool) Failure!void {
+fn preflight(path: []const u8, completeness: bool) Failure!std.meta.Tag(@import("source").Format) {
     var buffer: [4096:0]u8 = undefined;
     if (path.len == 0 or path.len >= buffer.len or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnreadableImage;
     @memcpy(buffer[0..path.len], path);
     buffer[path.len] = 0;
-    const source = try @import("source.zig").open(buffer[0..path.len :0], completeness);
-    source.close();
+    const source = try @import("source").open(buffer[0..path.len :0], completeness);
+    defer source.close();
+    return std.meta.activeTag(source.format);
 }
 
 pub fn loadWithAllocator(path: []const u8, max_pixel: u32, allocator: std.mem.Allocator) Failure!*Image {
     return loadWithLimits(path, max_pixel, allocator, .{});
 }
 pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Allocator, limits: Limits) Failure!*Image {
-    try preflight(path, true);
-    if (max_pixel == 0) if (try @import("tiff_decoder.zig").load(path, allocator, limits)) |decoded| return decoded;
+    const source_format = try preflight(path, true);
+    if (source_format == .tiff and max_pixel == 0) if (try @import("tiff_decoder.zig").load(path, allocator, limits)) |decoded| return decoded;
+    if (source_format == .pnm) {
+        const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
+        defer plan.deinit();
+        const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse return error.OutOfMemory;
+        defer n.CFRelease(space);
+        const decoded = try plan.decode(allocator, .{ .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .workers = if (limits.tiff_workers == 0) n.performanceCores() else limits.tiff_workers });
+        return @import("tiff_decoder.zig").fromDecoded(decoded, space, .pnm);
+    }
     const url = n.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse return error.UnreadableImage;
     defer n.CFRelease(url);
     const source_keys = [_]n.Ref{n.kCGImageSourceShouldCache};
@@ -51,10 +61,11 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     defer n.CFRelease(source);
     const props = n.CGImageSourceCopyPropertiesAtIndex(source, 0, null) orelse return error.UnreadableImage;
     defer n.CFRelease(props);
-    var width = number(props, n.kCGImagePropertyPixelWidth) orelse return error.InvalidDimensions;
-    var height = number(props, n.kCGImagePropertyPixelHeight) orelse return error.InvalidDimensions;
+    var width = (try number(props, n.kCGImagePropertyPixelWidth)) orelse return error.InvalidDimensions;
+    var height = (try number(props, n.kCGImagePropertyPixelHeight)) orelse return error.InvalidDimensions;
     if (width <= 0 or height <= 0 or width > max_source_dimension or height > max_source_dimension) return error.InvalidDimensions;
-    const orientation = number(props, n.kCGImagePropertyOrientation) orelse 1;
+    const orientation = (try number(props, n.kCGImagePropertyOrientation)) orelse 1;
+    if (orientation < 1 or orientation > 8) return error.InvalidDimensions;
     if (orientation >= 5 and orientation <= 8) std.mem.swap(i64, &width, &height);
     const largest: u32 = @intCast(@max(width, height));
     const edge = if (max_pixel == 0) largest else @min(largest, max_pixel);
@@ -62,7 +73,7 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     const ratio = @as(f64, @floatFromInt(edge)) / @as(f64, @floatFromInt(largest));
     const out_w: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(width)) * ratio));
     const out_h: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(height)) * ratio));
-    _ = std.math.mul(usize, (std.math.mul(usize, out_w, out_h) catch return error.SizeOverflow), 8) catch return error.SizeOverflow;
+    _ = try (try @import("raster").Extent.init(@intCast(out_w), @intCast(out_h))).bytes(4, 2);
     var limit: i64 = edge;
     const limit_number = n.CFNumberCreate(null, 4, &limit) orelse return error.OutOfMemory;
     defer n.CFRelease(limit_number);
@@ -87,7 +98,13 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     const decoded_width = n.CGImageGetWidth(native);
     const decoded_height = n.CGImageGetHeight(native);
     if (decoded_width == 0 or decoded_height == 0 or decoded_width > max_source_dimension or decoded_height > max_source_dimension) return error.InvalidDimensions;
+    const pixel_bits = n.CGImageGetBitsPerPixel(native);
+    if (pixel_bits == 0 or n.CGImageGetBitsPerComponent(native) == 0) return error.DecodeFailed;
+    const row_bits = std.math.mul(usize, decoded_width, pixel_bits) catch return error.SizeOverflow;
+    const minimum_row = (std.math.add(usize, row_bits, 7) catch return error.SizeOverflow) / 8;
+    if (n.CGImageGetBytesPerRow(native) < minimum_row) return error.DecodeFailed;
     const decoded_bytes = std.math.mul(usize, n.CGImageGetBytesPerRow(native), decoded_height) catch return error.SizeOverflow;
+    if (decoded_bytes > std.math.maxInt(isize)) return error.SizeOverflow;
     const image = allocator.create(Image) catch return error.OutOfMemory;
     image.* = .{
         .allocator = allocator,
@@ -110,17 +127,27 @@ pub const Metadata = struct {
     format_len: usize = 0,
 };
 pub fn metadata(path: []const u8) Failure!Metadata {
-    try preflight(path, false);
+    const source_format = try preflight(path, false);
+    if (source_format == .pnm) {
+        const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
+        defer plan.deinit();
+        var result: Metadata = .{ .width = plan.extent.width, .height = plan.extent.height };
+        const format = plan.format();
+        @memcpy(result.format[0..format.len], format);
+        result.format_len = format.len;
+        return result;
+    }
     const url = n.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse return error.UnreadableImage;
     defer n.CFRelease(url);
     const source = n.CGImageSourceCreateWithURL(url, null) orelse return error.UnreadableImage;
     defer n.CFRelease(source);
     const props = n.CGImageSourceCopyPropertiesAtIndex(source, 0, null) orelse return error.UnreadableImage;
     defer n.CFRelease(props);
-    var width = number(props, n.kCGImagePropertyPixelWidth) orelse return error.InvalidDimensions;
-    var height = number(props, n.kCGImagePropertyPixelHeight) orelse return error.InvalidDimensions;
+    var width = (try number(props, n.kCGImagePropertyPixelWidth)) orelse return error.InvalidDimensions;
+    var height = (try number(props, n.kCGImagePropertyPixelHeight)) orelse return error.InvalidDimensions;
     if (width <= 0 or height <= 0 or width > max_source_dimension or height > max_source_dimension) return error.InvalidDimensions;
-    const orientation = number(props, n.kCGImagePropertyOrientation) orelse 1;
+    const orientation = (try number(props, n.kCGImagePropertyOrientation)) orelse 1;
+    if (orientation < 1 or orientation > 8) return error.InvalidDimensions;
     if (orientation >= 5 and orientation <= 8) std.mem.swap(i64, &width, &height);
     var result: Metadata = .{ .width = @intCast(width), .height = @intCast(height) };
     const kind = n.CGImageSourceGetType(source) orelse return error.UnreadableImage;

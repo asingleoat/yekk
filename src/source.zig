@@ -31,17 +31,36 @@ pub fn exists(path: []const u8) bool {
     return files.stat(terminated.ptr, &stat) == 0 or (runtime.errno().* != c.ENOENT and runtime.errno().* != c.ENOTDIR);
 }
 
+pub const Format = union(enum) { other, tiff, pnm, bmp: @import("bmp").Header };
 pub const Open = struct {
+    format: Format = .other,
     fd: c_int,
     stamp: Stamp,
+    pub fn bmp(self: Open) ?@import("bmp").Header { return switch (self.format) { .bmp => |header| header, else => null }; }
     pub fn close(self: Open) void {
         _ = c.close(self.fd);
     }
+    pub fn readAt(self: Open, output: []u8, offset: u64) Error!usize {
+        if (offset >= @as(u64, @intCast(self.stamp.bytes))) return 0;
+        const length = @min(output.len, @as(u64, @intCast(self.stamp.bytes)) - offset);
+        while (true) {
+            const count = runtime.pread(self.fd, output.ptr, length, @intCast(offset));
+            if (count < 0 and runtime.errno().* == c.EINTR) continue;
+            if (count < 0) return error.UnreadableImage;
+            return @intCast(count);
+        }
+    }
+    pub fn unchanged(self: Open) bool {
+        var stat: c.struct_stat = undefined;
+        return files.fstat(self.fd, &stat) == 0 and @import("std").meta.eql(self.stamp, Stamp.fromStat(stat));
+    }
 };
-pub const Error = error{ UnreadableImage, IncompleteImage, DecodeFailed };
+pub const Error = error{ UnreadableImage, IncompleteImage, DecodeFailed, InvalidDimensions, SizeOverflow };
 /// Validate source kind and container completeness before invoking any decoder.
 /// Native libraries still validate their complete format-specific contents.
 pub fn open(path: [:0]const u8, completeness: bool) Error!Open {
+    const std = @import("std");
+    if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnreadableImage;
     const fd = c.open(path.ptr, c.O_RDONLY | c.O_NONBLOCK | c.O_CLOEXEC);
     if (fd < 0) return error.UnreadableImage;
     errdefer _ = c.close(fd);
@@ -50,14 +69,22 @@ pub fn open(path: [:0]const u8, completeness: bool) Error!Open {
     var signature: [8]u8 = undefined;
     const count = runtime.pread(fd, &signature, signature.len, 0);
     if (count < 2) return error.UnreadableImage;
-    const std = @import("std");
     if (count == signature.len and std.mem.eql(u8, &signature, "\x89PNG\r\n\x1a\n")) {
         var tail: [12]u8 = undefined;
         if (stat.st_size < 20 or runtime.pread(fd, &tail, tail.len, stat.st_size - 12) != tail.len or !std.mem.eql(u8, &tail, "\x00\x00\x00\x00IEND\xae\x42\x60\x82")) return error.IncompleteImage;
     } else if (completeness and signature[0] == 0xff and signature[1] == 0xd8) {
         try @import("jpeg_container.zig").validate(fd, @intCast(stat.st_size));
     }
-    return .{ .fd = fd, .stamp = Stamp.fromStat(stat) };
+    var format: Format = .other;
+    if (count >= 4 and (std.mem.eql(u8, signature[0..4], "II\x2a\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2a") or std.mem.eql(u8, signature[0..4], "II\x2b\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2b"))) format = .tiff;
+    if (signature[0] == 'P' and signature[1] >= '1' and signature[1] <= '6') format = .pnm;
+    if (signature[0] == 'B' and signature[1] == 'M') {
+        var header: [138]u8 = undefined;
+        const length = runtime.pread(fd, &header, header.len, 0);
+        if (length < 0) return error.UnreadableImage;
+        format = .{ .bmp = try @import("bmp").Header.read(header[0..@intCast(length)], @intCast(stat.st_size)) };
+    }
+    return .{ .fd = fd, .stamp = Stamp.fromStat(stat), .format = format };
 }
 
 test "existence accepts a borrowed path slice without sentinel storage" {

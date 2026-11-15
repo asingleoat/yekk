@@ -26,6 +26,20 @@ This lets successive writes reuse small regions of CPU cache.
 Platform code converts RGB to RGBA by adding an opaque alpha channel.
 macOS uses Apple's Accelerate routines. Linux uses vectorized Zig.
 
+## PNM decoding
+
+Shared Zig code decodes PBM, PGM and PPM files. One allocation holds the image
+record and RGBA pixels. RGBA adds an alpha value to each red, green and blue pixel.
+Large binary images share the decoder worker budget. Each worker reads input
+into the end of its own output region. Conversion proceeds forward, so each
+input sample is read before output can overwrite it. This avoids a second
+image-sized allocation and copy. Workers also clear row padding. All workers
+finish before their shared allocation can be released.
+
+The decoder selects sample width, channel count and sample-range conversion
+before entering pixel loops. Full-range 8-bit and 16-bit samples need no scaling.
+Other ranges use checked integer scaling. Header probing does not decode pixels.
+
 ## SIMD prediction
 
 TIFF Predictor 2 stores differences between adjacent samples of the same channel.

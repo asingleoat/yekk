@@ -7,6 +7,7 @@ const Image = t.Image;
 const Metadata = t.Metadata;
 const tiff = @import("tiff_pixels");
 const build_options = @import("build_options");
+const Extent = @import("raster").Extent;
 var decode_workers: usize = 1;
 var busy_workers: std.atomic.Value(usize) = .init(0);
 var srgb16: [65536]f32 = undefined;
@@ -17,6 +18,7 @@ pub fn check(status: c_int) Error!void {
 }
 pub fn init(workers: c_int) c_int {
     if (c.vips_init("yekk") != 0) return -1;
+    c.vips_block_untrusted_set(1);
     c.vips_cache_set_max(0);
     const selected: c_int = if (workers > 0) workers else @intCast(@min(std.math.maxInt(c_int), @import("linux_resources.zig").physicalCores()));
     c.vips_concurrency_set(selected);
@@ -38,10 +40,21 @@ pub fn lastError() [*:0]const u8 {
     return c.vips_error_buffer();
 }
 pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
-    const input = c.vips_image_new_from_file(path, "access", @as(c_int, c.VIPS_ACCESS_RANDOM), @as(?*anyopaque, null)) orelse return -1;
+    const candidate = @import("pnm").Plan.open(std.mem.span(path), null) catch return -1;
+    if (candidate) |plan| {
+        defer plan.deinit();
+        result.* = .{ .width = plan.extent.width, .height = plan.extent.height, .bits = if (plan.maximum > 255) 16 else 8 };
+        const format = plan.format();
+        @memcpy(result.format[0..format.len], format);
+        return 0;
+    }
+    const input = openImage(path, false) catch return -1;
     defer t.unref(input);
+    const extent = Extent.init(input.*.Xsize, input.*.Ysize) catch return -1;
+    if (input.*.BandFmt < c.VIPS_FORMAT_UCHAR or input.*.BandFmt >= c.VIPS_FORMAT_LAST) return -1;
     const orientation = c.vips_image_get_orientation(input);
-    result.* = .{ .width = @intCast(if (orientation >= 5) input.*.Ysize else input.*.Xsize), .height = @intCast(if (orientation >= 5) input.*.Xsize else input.*.Ysize), .bits = @intCast(c.vips_format_sizeof(input.*.BandFmt) * 8) };
+    if (orientation < 1 or orientation > 8) return -1;
+    result.* = .{ .width = if (orientation >= 5) extent.height else extent.width, .height = if (orientation >= 5) extent.width else extent.height, .bits = @intCast(c.vips_format_sizeof(input.*.BandFmt) * 8) };
     var loader: [*c]const u8 = "unknown";
     _ = c.vips_image_get_string(input, "vips-loader", &loader);
     const name = t.text(loader);
@@ -51,14 +64,21 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
     return 0;
 }
 pub fn formats() void {
-    const suffixes = c.vips_foreign_get_suffixes();
-    if (suffixes == null) return;
-    defer c.g_strfreev(suffixes);
-    var i: usize = 0;
-    while (suffixes[i] != null) : (i += 1) {
-        // Float-only formats were never part of the still-image contract.
-        if (t.same(suffixes[i], ".hdr") or t.same(suffixes[i], ".pfm")) continue;
-        _ = c.puts(suffixes[i]);
+    inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm" }) |suffix| _ = c.puts(suffix);
+    // Report enabled image readers, rather than every installed native plugin.
+    inline for (.{
+        .{ "jpegload_source", .{ ".jpg", ".jpeg", ".jpe", ".jfif" } },
+        .{ "pngload_source", .{".png"} },
+        .{ "tiffload_source", .{ ".tif", ".tiff" } },
+        .{ "gifload_source", .{".gif"} },
+        .{ "webpload_source", .{".webp"} },
+        .{ "heifload_source", .{ ".heic", ".heif", ".avif" } },
+        .{ "jxlload_source", .{".jxl"} },
+    }) |entry| {
+        if (c.vips_operation_new(entry[0])) |operation| {
+            defer t.unref(operation);
+            if (c.vips_operation_get_flags(operation) & (c.VIPS_OPERATION_BLOCKED | c.VIPS_OPERATION_UNTRUSTED) == 0) inline for (entry[1]) |suffix| { _ = c.puts(suffix); };
+        }
     }
 }
 pub fn linearProfile() c.cmsHPROFILE {
@@ -231,31 +251,28 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
             } else supported = false;
         }
         if (supported) {
-            if (plan.width > std.math.maxInt(c_int) or plan.height > std.math.maxInt(c_int)) return error.InvalidDimensions;
+            if (plan.header.width > std.math.maxInt(c_int) or plan.header.height > std.math.maxInt(c_int)) return error.InvalidDimensions;
             const workers = try acquireWorkers(plan.workerCount(decode_workers, false), load_options);
             defer _ = busy_workers.fetchSub(workers, .release);
-            const width: usize = if (plan.orientation >= 5) plan.height else plan.width;
-            const height: usize = if (plan.orientation >= 5) plan.width else plan.height;
-            const layout = try tiff.storageLayout(width, height, plan.scratch_bytes, workers, owner_offset + @sizeOf(Owner), 1, plan.profile.len);
+            const width: usize = if (plan.header.orientation >= 5) plan.header.height else plan.header.width;
+            const height: usize = if (plan.header.orientation >= 5) plan.header.width else plan.header.height;
+            const layout = try tiff.storageLayout(width, height, plan.header.scratch_bytes, workers, owner_offset + @sizeOf(Owner), 1, plan.profile.len);
             try reserveTemporary(layout.total);
             defer releaseTemporary(layout.total);
             const decoded = try plan.decode(false, allocator, .{ .workers = workers, .simd_predictor = true, .raw_retirement = !build_options.debug_allocator, .prefix_bytes = owner_offset + @sizeOf(Owner), .row_alignment = 1, .cancel = load_options.cancel }, null);
-            var owned = true;
-            errdefer if (owned) decoded.deinit();
-            const resident = c.vips_image_new_from_memory(decoded.pixels.ptr, decoded.pixels.len, @intCast(decoded.width), @intCast(decoded.height), 4, c.VIPS_FORMAT_USHORT) orelse return error.OutOfMemory;
-            errdefer t.unref(resident);
-            const owner: *Owner = @ptrCast(@alignCast(decoded.slab[owner_offset..].ptr));
-            owner.* = .{ .allocator = allocator, .slab = decoded.slab };
-            c.g_object_set_data_full(@ptrCast(resident), "yekk-owner", owner, Owner.destroy);
-            owned = false;
-            resident.*.Type = c.VIPS_INTERPRETATION_RGB16;
-            if (decoded.profile.len > 0) {
-                c.vips_image_set_blob_copy(resident, c.VIPS_META_ICC_NAME, decoded.profile.ptr, decoded.profile.len);
-                c.vips_image_set_int(resident, "yekk-native-profile", 1);
-            }
-            _ = decoded.reclaimScratch();
-            return .{ .prefix = @ptrCast(decoded.slab.ptr), .pixels = .{ .image = resident, .width = decoded.width, .height = decoded.height, .bits = 16, .bytes = decoded.pixels.len, .opaque_source = true } };
+            return wrapDecoded(decoded, allocator, owner_offset);
         }
+    }
+    if (try @import("pnm").Plan.open(std.mem.span(path), load_options.cancel)) |plan| {
+        defer plan.deinit();
+        if (plan.extent.width > std.math.maxInt(c_int) or plan.extent.height > std.math.maxInt(c_int)) return error.InvalidDimensions;
+        const workers = try acquireWorkers(plan.workerCount(decode_workers), load_options);
+        defer _ = busy_workers.fetchSub(workers, .release);
+        const options: @import("pnm").Options = .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .row_alignment = .contiguous, .raw_retirement = !build_options.debug_allocator, .cancel = load_options.cancel, .workers = workers };
+        const bytes = try plan.storageBytes(options);
+        try reserveTemporary(bytes);
+        defer releaseTemporary(bytes);
+        return wrapDecoded(try plan.decode(allocator, options), allocator, owner_offset);
     }
     var pixels: Image = .{};
     try decodeImage(path, &pixels);
@@ -266,22 +283,54 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
     c.g_object_set_data_full(@ptrCast(pixels.image), "yekk-owner", owner, Owner.destroy);
     return .{ .prefix = @ptrCast(slab.ptr), .pixels = pixels };
 }
+fn wrapDecoded(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
+    var owned = true;
+    errdefer if (owned) decoded.deinit();
+    const resident = c.vips_image_new_from_memory(decoded.pixels.ptr, decoded.pixels.len, @intCast(decoded.width), @intCast(decoded.height), 4, if (decoded.bits_per_component == 16) c.VIPS_FORMAT_USHORT else c.VIPS_FORMAT_UCHAR) orelse return error.OutOfMemory;
+    errdefer t.unref(resident);
+    const owner: *Owner = @ptrCast(@alignCast(decoded.slab[owner_offset..].ptr));
+    owner.* = .{ .allocator = allocator, .slab = decoded.slab };
+    c.g_object_set_data_full(@ptrCast(resident), "yekk-owner", owner, Owner.destroy);
+    owned = false;
+    resident.*.Type = if (decoded.bits_per_component == 16) c.VIPS_INTERPRETATION_RGB16 else c.VIPS_INTERPRETATION_sRGB;
+    if (decoded.profile.len > 0) {
+        c.vips_image_set_blob_copy(resident, c.VIPS_META_ICC_NAME, decoded.profile.ptr, decoded.profile.len);
+        c.vips_image_set_int(resident, "yekk-native-profile", 1);
+    }
+    _ = decoded.reclaimScratch();
+    return .{ .prefix = @ptrCast(decoded.slab.ptr), .pixels = .{ .image = resident, .width = decoded.width, .height = decoded.height, .bits = decoded.bits_per_component, .bytes = decoded.pixels.len, .opaque_source = true } };
+}
 pub fn decode(path: [*:0]const u8, result: *Image) c_int {
     result.* = .{};
     const loaded = loadWithPrefix(0, std.heap.c_allocator, path, .{}) catch |err| return if (err == error.OutOfMemory) -2 else -1;
     result.* = loaded.pixels;
     return 0;
 }
+/// File names are literal paths, never libvips option strings. Pin the regular
+/// file before handing it to a native loader; do not reopen a raced path.
+fn openImage(path: [*:0]const u8, memory: bool) Error!*c.VipsImage {
+    const opened = @import("source").open(std.mem.span(path), false) catch return error.NativeImageFailed;
+    defer opened.close();
+    if (opened.bmp()) |header| {
+        const bytes = std.math.add(usize, header.extent.bytes(4, 2) catch return error.NativeImageFailed, if (header.profile) |profile| profile.length else 0) catch return error.NativeImageFailed;
+        if (memory) try reserveTemporary(bytes);
+        defer if (memory) releaseTemporary(bytes);
+        return @import("linux_bmp.zig").load(opened, memory);
+    }
+    // The pinned libvips duplicates this descriptor; we retain the original.
+    const source = c.vips_source_new_from_descriptor(opened.fd) orelse return error.NativeImageFailed;
+    defer t.unref(source);
+    return c.vips_image_new_from_source(source, "", "access", @as(c_int, c.VIPS_ACCESS_RANDOM), "memory", @as(c_int, @intFromBool(memory)), "fail_on", @as(c_int, c.VIPS_FAIL_ON_WARNING), @as(?*anyopaque, null)) orelse error.NativeImageFailed;
+}
 fn decodeImage(path: [*:0]const u8, result: *Image) Error!void {
     c.vips_error_clear();
-    const input = c.vips_image_new_from_file(path, "access", @as(c_int, c.VIPS_ACCESS_RANDOM), "memory", @as(c_int, 1), "fail_on", @as(c_int, c.VIPS_FAIL_ON_WARNING), @as(?*anyopaque, null)) orelse return error.NativeImageFailed;
+    const input = try openImage(path, true);
     defer t.unref(input);
     // Explicitly reject floating/HDR source formats, including TIFF variants.
-    if (input.*.Xsize <= 0 or input.*.Ysize <= 0 or (input.*.BandFmt != c.VIPS_FORMAT_UCHAR and input.*.BandFmt != c.VIPS_FORMAT_USHORT) or input.*.Coding != c.VIPS_CODING_NONE) return error.UnsupportedSampleFormat;
-    const sample: u64 = if (input.*.BandFmt == c.VIPS_FORMAT_USHORT) 2 else 1;
-    const pixels = @as(u64, @intCast(input.*.Xsize)) * @as(u64, @intCast(input.*.Ysize));
-    const minimum = std.math.mul(u64, pixels, 4 * sample) catch return error.OutOfMemory;
-    if (minimum > std.math.maxInt(usize)) return error.OutOfMemory;
+    if (input.*.Bands <= 0 or (input.*.BandFmt != c.VIPS_FORMAT_UCHAR and input.*.BandFmt != c.VIPS_FORMAT_USHORT) or input.*.Coding != c.VIPS_CODING_NONE) return error.UnsupportedSampleFormat;
+    const extent = Extent.init(input.*.Xsize, input.*.Ysize) catch return error.NativeImageFailed;
+    const sample: usize = if (input.*.BandFmt == c.VIPS_FORMAT_USHORT) 2 else 1;
+    const minimum = @max(extent.bytes(4, sample) catch return error.OutOfMemory, extent.bytes(@intCast(input.*.Bands), sample) catch return error.OutOfMemory);
     try reserveTemporary(minimum);
     defer releaseTemporary(minimum);
     var oriented: ?*c.VipsImage = null;
@@ -327,8 +376,13 @@ fn decodeImage(path: [*:0]const u8, result: *Image) Error!void {
     if (c.vips_image_hasalpha(colour) != 0) alpha = @ptrCast(@alignCast(c.g_object_ref(colour))) else try check(c.vips_addalpha(colour, &alpha, @as(?*anyopaque, null)));
     defer t.unref(alpha);
     if (alpha.?.Bands != 4 or (alpha.?.BandFmt != c.VIPS_FORMAT_UCHAR and alpha.?.BandFmt != c.VIPS_FORMAT_USHORT)) return error.UnsupportedSampleFormat;
+    const output_extent = Extent.init(alpha.?.Xsize, alpha.?.Ysize) catch return error.NativeImageFailed;
+    const bytes = output_extent.bytes(4, if (alpha.?.BandFmt == c.VIPS_FORMAT_USHORT) 2 else 1) catch return error.OutOfMemory;
+    const extra = bytes -| minimum;
+    if (extra > 0) try reserveTemporary(extra);
+    defer if (extra > 0) releaseTemporary(extra);
     const resident = c.vips_image_copy_memory(alpha) orelse return error.NativeImageFailed;
-    result.* = .{ .image = resident, .width = @intCast(resident.*.Xsize), .height = @intCast(resident.*.Ysize), .bits = if (resident.*.BandFmt == c.VIPS_FORMAT_USHORT) 16 else 8, .bytes = pixels * 4 * @as(usize, if (resident.*.BandFmt == c.VIPS_FORMAT_USHORT) 2 else 1), .opaque_source = c.vips_image_hasalpha(colour) == 0 };
+    result.* = .{ .image = resident, .width = output_extent.width, .height = output_extent.height, .bits = if (resident.*.BandFmt == c.VIPS_FORMAT_USHORT) 16 else 8, .bytes = bytes, .opaque_source = c.vips_image_hasalpha(colour) == 0 };
 }
 /// Called only by the render worker; source pixels and UI-held frames remain valid.
 pub fn dropDerived(image: *Image) void {

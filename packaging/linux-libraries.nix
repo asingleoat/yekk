@@ -8,7 +8,7 @@ let
   privateMetadata = map (item: item.package) (builtins.genericClosure {
     # x265's pinned recipe records its NUMA library as a native build input.
     startSet = map entry (with pkgs; [
-      glib pango libheif libjxl imagemagick numactl libimagequant cgif
+      glib pango libheif libjxl numactl libimagequant cgif
       libexif libhwy libxml2 expat fontconfig
     ]);
     operator = item: map entry (lib.filter lib.isDerivation (
@@ -45,6 +45,7 @@ let
     cfitsio = null; fftw = null; libarchive = null; libraw = null;
     librsvg = null; libultrahdr = null; matio = null; openexr = null;
     openjpeg = null; openslide = null; poppler = null;
+    imagemagick = null;
   }).overrideAttrs (old: {
     buildInputs = old.buildInputs ++ privateMetadata;
     mesonFlags = old.mesonFlags ++ [
@@ -55,7 +56,7 @@ let
       "-Dauto_features=disabled"
     ] ++ map (name: "-D${name}=enabled") [
       "cgif" "exif" "fontconfig" "heif" "imagequant" "jpeg" "jpeg-xl"
-      "lcms" "magick" "highway" "pangocairo" "png" "tiff" "webp" "zlib"
+      "lcms" "highway" "pangocairo" "png" "tiff" "webp" "zlib"
     ];
     postFixup = "";
   });

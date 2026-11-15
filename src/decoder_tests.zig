@@ -7,6 +7,42 @@ test "malformed and missing inputs fail without owning an image" {
     try std.testing.expectError(error.UnreadableImage, decoder.load("build.zig", 1000));
 }
 
+test "BMP metadata and native decoding reject truncated and linked-profile files" {
+    inline for (.{ "rgb24", "topdown", "rgb565", "pal8", "pal4", "pal1", "rle8", "rle4" }) |kind| {
+        const image = try decoder.load("tests/fixtures/bmp-" ++ kind ++ ".bmp", 0);
+        try std.testing.expectEqual(@as(u32, 3), image.width);
+        try std.testing.expectEqual(@as(u32, 2), image.height);
+        image.destroy();
+    }
+    inline for (.{ "truncated", "linked-profile" }) |kind| {
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        if (decoder.loadWithAllocator("tests/fixtures/bmp-" ++ kind ++ ".bmp", 0, allocator.allocator())) |image| {
+            image.destroy();
+            return error.AcceptedInvalidBmp;
+        } else |_| {}
+        try std.testing.expectEqual(@as(usize, 0), allocator.alloc_index);
+    }
+}
+
+test "PNM native providers retain the shared decoder's precision and single slab" {
+    inline for (.{ "p1.pbm", "p4.pbm", "p2-8.pgm", "p2-16.pgm", "p5-8.pgm", "p5-16.pgm", "p3-8.ppm", "p3-16.ppm", "p6-8.ppm", "p6-16.ppm" }) |name| {
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decoder.loadWithAllocator("tests/fixtures/pnm-" ++ name, 0, allocator.allocator());
+        try std.testing.expectEqual(decoder.Backend.pnm, image.backend);
+        try std.testing.expectEqual(@as(u32, 3), image.width);
+        try std.testing.expectEqual(@as(u32, 2), image.height);
+        const bits: usize = if (std.mem.indexOf(u8, name, "16") != null) 16 else 8;
+        try std.testing.expectEqual(bits, n.CGImageGetBitsPerComponent(image.native));
+        if (bits == 16 and std.mem.endsWith(u8, name, ".ppm")) {
+            const samples: *const [4]u16 = @ptrCast(@alignCast(image.ownedPixels().?.ptr));
+            try std.testing.expectEqualSlices(u16, &.{ 0x1234, 0xabcd, 0xff, 65535 }, samples);
+        }
+        image.destroy();
+        try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+        try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    }
+}
+
 test "contents identify a PNG with an unrelated extension, including alpha" {
     const image = try decoder.load("tests/fixtures/alpha.content", 1000);
     defer image.destroy();

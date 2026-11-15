@@ -146,7 +146,7 @@ const Image = struct {
     }
 };
 
-const Stamp = @import("source.zig").Stamp;
+const Stamp = @import("source").Stamp;
 const Entry = struct { image: ?*Image = null, failed: bool = false, reload: bool = false, refreshing: bool = false, version: u64 = 0, stamp: ?Stamp = null };
 const Request = controls.Request;
 const Result = struct { requested_at: f64 = 0, pixels: native.Frame = native.Frame{}, revision: u64 = 0, image_version: u64 = 0, index: usize = 0, width: u32 = 0, height: u32 = 0, view: core.View = .{}, stamp: ?Stamp = null, link_stamp: ?Stamp = null };
@@ -380,7 +380,7 @@ fn decodeWithAllocator(path: [:0]const u8, allocator: std.mem.Allocator) !*Image
 }
 fn decodeScheduled(path: [:0]const u8, allocator: std.mem.Allocator, load_options: native.image.LoadOptions) !*Image {
     const link_stamp = Stamp.readLink(path) orelse return error.UnreadableImage;
-    const opened = try @import("source.zig").open(path, true);
+    const opened = try @import("source").open(path, true);
     defer opened.close();
     const loaded = native.image.loadWithPrefix(@sizeOf(Image), allocator, path.ptr, load_options) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -884,7 +884,7 @@ fn hookWorker(state: *State) void {
                 break :value commands.Result{};
             };
             runtime.output(2, result.output[0..result.len]);
-            const exists = @import("source.zig").exists(job.snapshot.path);
+            const exists = @import("source").exists(job.snapshot.path);
             state.lock.lock();
             state.hook_running = false;
             state.hook_failed = failed or !result.success();
@@ -2021,6 +2021,107 @@ test "Linux JPEG variants and grayscale preserve dimensions and precision" {
         }
         if (std.mem.endsWith(u8, path, "gray16.png")) try std.testing.expectEqual(@as(u32, 16), image.pixels.bits);
     }
+}
+
+test "untrusted native loaders remain blocked behind the shared PNM reader" {
+    try initTestDecoder();
+    const c = native.types.c;
+    if (c.vips_image_new_from_file("tests/fixtures/pnm-p6-8.ppm", @as(?*anyopaque, null))) |image| {
+        c.g_object_unref(image);
+        return error.UntrustedReaderEnabled;
+    }
+    c.vips_error_clear();
+}
+
+test "SDL BMP decoding preserves palette, RLE, orientation and 565 pixels" {
+    try initTestDecoder();
+    inline for (.{ "rgb24", "topdown", "rgb565", "pal8", "pal4", "pal1", "rle8", "rle4" }) |kind| {
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decodeWithAllocator("tests/fixtures/bmp-" ++ kind ++ ".bmp", allocator.allocator());
+        var pixel: [4]u16 = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&image.pixels, 0, 0, &pixel));
+        try std.testing.expectEqualSlices(u16, &.{ 65535, 0, 0, 65535 }, &pixel);
+        try std.testing.expectEqual(@as(u32, 3), image.pixels.width);
+        try std.testing.expectEqual(@as(u32, 2), image.pixels.height);
+        image.destroy();
+        try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+        try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    }
+    inline for (.{ "truncated", "linked-profile", "invalid-profile" }) |kind| {
+        if (decodeWithAllocator("tests/fixtures/bmp-" ++ kind ++ ".bmp", std.testing.allocator)) |image| {
+            image.destroy();
+            return error.AcceptedInvalidBmp;
+        } else |_| {}
+    }
+}
+
+test "decoder paths keep brackets literal and metadata probing rejects pipes" {
+    try initTestDecoder();
+    var path: ["/tmp/yekk-path-XXXXXX".len:0]u8 = "/tmp/yekk-path-XXXXXX".*;
+    const fd = posix.mkstemp(&path);
+    try std.testing.expect(fd >= 0);
+    _ = posix.close(fd);
+    defer _ = posix.unlink(&path);
+    var target: [4096]u8 = undefined;
+    try std.testing.expect(posix.realpath("tests/fixtures/alpha.content", &target) != null);
+    var literal: [4096]u8 = undefined;
+    const named = try std.fmt.bufPrintSentinel(&literal, "{s}[page=999999]", .{std.mem.span(@as([*:0]const u8, &path))}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), posix.symlink(@ptrCast(&target), named.ptr));
+    defer _ = posix.unlink(named.ptr);
+    const image = try decodeWithAllocator(named, std.testing.allocator);
+    defer image.destroy();
+    try std.testing.expectEqual(@as(u32, 3), image.pixels.width);
+    var metadata: native.Metadata = .{};
+    try std.testing.expectEqual(@as(c_int, 0), native.image.probe(named.ptr, &metadata));
+    try std.testing.expectEqual(@as(u32, 3), metadata.width);
+    _ = posix.unlink(&path);
+    try std.testing.expectEqual(@as(c_int, 0), posix.mkfifo(&path, 0o600));
+    try std.testing.expectEqual(@as(c_int, -1), native.image.probe(&path, &metadata));
+}
+
+test "shared PNM pixels and header probing retain native sample precision" {
+    try initTestDecoder();
+    inline for (.{ "p1.pbm", "p4.pbm", "p2-8.pgm", "p2-16.pgm", "p5-8.pgm", "p5-16.pgm", "p3-8.ppm", "p3-16.ppm", "p6-8.ppm", "p6-16.ppm" }) |name| {
+        const path = "tests/fixtures/pnm-" ++ name;
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decodeWithAllocator(path, allocator.allocator());
+        try std.testing.expectEqual(@as(u32, 3), image.pixels.width);
+        try std.testing.expectEqual(@as(u32, 2), image.pixels.height);
+        var metadata: native.Metadata = .{};
+        try std.testing.expectEqual(@as(c_int, 0), native.image.probe(path, &metadata));
+        try std.testing.expectEqual(metadata.bits, image.pixels.bits);
+        if (metadata.bits == 16 and std.mem.endsWith(u8, name, ".ppm")) {
+            var rgba: [4]u16 = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&image.pixels, 0, 0, &rgba));
+            try std.testing.expectEqualSlices(u16, &.{ 0x1234, 0xabcd, 0xff, 65535 }, &rgba);
+        }
+        image.destroy();
+        try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+        try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    }
+}
+
+test "repeated native source loads release their file descriptors" {
+    try initTestDecoder();
+    const count = struct {
+        fn open() !usize {
+            const directory = runtime.files.opendir("/proc/self/fd") orelse return error.FdDirectoryUnavailable;
+            defer _ = posix.closedir(directory);
+            var result: usize = 0;
+            while (runtime.files.readdir(directory) != null) result += 1;
+            return result;
+        }
+    }.open;
+    const warmup = try decodeWithAllocator("tests/fixtures/alpha.content", std.testing.allocator);
+    warmup.destroy();
+    const before = try count();
+    for (0..32) |_| {
+        const image = try decodeWithAllocator("tests/fixtures/alpha.content", std.testing.allocator);
+        image.destroy();
+        var metadata: native.Metadata = .{};
+        try std.testing.expectEqual(@as(c_int, 0), native.image.probe("tests/fixtures/alpha.content", &metadata));
+    }
+    try std.testing.expectEqual(before, try count());
 }
 
 test "Linux viewport pans reuse full pixels and fit overview" {

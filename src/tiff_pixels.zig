@@ -3,7 +3,7 @@ const std = @import("std");
 const c = @import("tiff_bindings");
 const system = @import("system");
 const runtime = @import("runtime");
-const files = runtime.files;
+const source_file = @import("source");
 const platform = @import("platform/tiff_runtime.zig");
 pub const Failure = error{ OutOfMemory, UnreadableImage, InvalidDimensions, SizeOverflow, DecodeFailed, IncompleteImage, SourceChanged, Cancelled };
 pub const Options = struct { workers: usize = 1, no_cache: bool = false, poison_allocation: bool = false, dynamic: bool = false, simd_predictor: bool = false, raw_retirement: bool = false, prefix_bytes: usize = 0, row_alignment: usize = 64, cancel: ?*const std.atomic.Value(bool) = null };
@@ -22,22 +22,14 @@ pub const Timings = struct {
     simd_predictor: bool = false,
 };
 
-fn openHandle(path: [*:0]const u8) ?*c.TIFF {
-    const fd = system.open(path, system.O_RDONLY | system.O_NONBLOCK | system.O_CLOEXEC);
-    if (fd < 0) return null;
-    var stat: system.struct_stat = undefined;
-    if (files.fstat(fd, &stat) != 0 or stat.st_mode & system.S_IFMT != system.S_IFREG) {
-        _ = system.close(fd);
-        return null;
-    }
-    return c.TIFFFdOpen(fd, path, "rm") orelse {
-        _ = system.close(fd);
+fn openHandle(path: [:0]const u8) ?*c.TIFF {
+    const opened = source_file.open(path, false) catch return null;
+    return c.TIFFFdOpen(opened.fd, path.ptr, "rm") orelse {
+        opened.close();
         return null;
     };
 }
-pub const Plan = struct {
-    name: [4096:0]u8,
-    tif: *c.TIFF,
+const Header = struct {
     width: u32,
     height: u32,
     orientation: u16,
@@ -46,22 +38,7 @@ pub const Plan = struct {
     tiled: bool,
     scratch_bytes: usize,
     predictor: bool,
-    profile: []const u8,
-
-    pub fn open(path: []const u8) Failure!?Plan {
-        var name: [4096:0]u8 = undefined;
-        if (path.len >= name.len) return error.UnreadableImage;
-        @memcpy(name[0..path.len], path);
-        name[path.len] = 0;
-        const fd = system.open(&name, system.O_RDONLY | system.O_NONBLOCK | system.O_CLOEXEC);
-        if (fd < 0) return error.UnreadableImage;
-        var signature: [4]u8 = undefined;
-        const count = system.pread(fd, &signature, 4, 0);
-        _ = system.close(fd);
-        if (count != 4 or (!std.mem.eql(u8, &signature, "II\x2a\x00") and !std.mem.eql(u8, &signature, "MM\x00\x2a") and !std.mem.eql(u8, &signature, "II\x2b\x00") and !std.mem.eql(u8, &signature, "MM\x00\x2b"))) return null;
-        const tif = openHandle(&name) orelse return error.DecodeFailed;
-        var owned = true;
-        defer if (owned) c.TIFFClose(tif);
+    fn read(tif: *c.TIFF) Failure!?Header {
         var width: u32 = 0;
         var height: u32 = 0;
         var bits: u16 = 0;
@@ -89,30 +66,67 @@ pub const Plan = struct {
         if (block_w == 0 or block_h == 0) return error.InvalidDimensions;
         const scratch = if (tiled) c.TIFFTileSize64(tif) else c.TIFFStripSize64(tif);
         if (scratch == 0 or scratch > std.math.maxInt(isize) or scratch % 2 != 0) return error.SizeOverflow;
+        const expected = try (try @import("raster").Extent.init(block_w, block_h)).bytes(3, 2);
+        if (scratch != expected) return error.InvalidDimensions;
         var compression: u16 = 1;
         var predictor: u16 = 1;
         _ = c.TIFFGetField(tif, 259, &compression);
         if (compression == 8 or compression == 32946) _ = c.TIFFGetField(tif, 317, &predictor);
+        return .{ .width = width, .height = height, .orientation = orientation, .block_w = block_w, .block_h = block_h, .tiled = tiled, .scratch_bytes = @intCast(scratch), .predictor = predictor == 2 };
+    }
+};
+pub const Plan = struct {
+    name: [4096:0]u8,
+    tif: *c.TIFF,
+    header: Header,
+    stamp: source_file.Stamp,
+    profile: []const u8,
+
+    pub fn open(path: []const u8) Failure!?Plan {
+        var name: [4096:0]u8 = undefined;
+        if (path.len == 0 or path.len >= name.len or std.mem.indexOfScalar(u8, path, 0) != null) return error.UnreadableImage;
+        @memcpy(name[0..path.len], path);
+        name[path.len] = 0;
+        const path_z = name[0..path.len :0];
+        const opened = try source_file.open(path_z, false);
+        if (std.meta.activeTag(opened.format) != .tiff) {
+            opened.close();
+            return null;
+        }
+        const tif = c.TIFFFdOpen(opened.fd, path_z.ptr, "rm") orelse {
+            opened.close();
+            return error.DecodeFailed;
+        };
+        var owned = true;
+        defer if (owned) c.TIFFClose(tif);
+        const header = (try Header.read(tif)) orelse return null;
         var profile_len: u32 = 0;
         var profile_ptr: ?[*]const u8 = null;
         _ = c.TIFFGetField(tif, 34675, &profile_len, &profile_ptr);
         owned = false;
-        return .{ .name = name, .tif = tif, .width = width, .height = height, .orientation = orientation, .block_w = block_w, .block_h = block_h, .tiled = tiled, .scratch_bytes = @intCast(scratch), .predictor = predictor == 2, .profile = if (profile_ptr) |p| p[0..profile_len] else "" };
+        return .{ .name = name, .tif = tif, .header = header, .stamp = opened.stamp, .profile = if (profile_ptr) |p| p[0..profile_len] else "" };
+    }
+    fn validateHandle(self: *const Plan, tif: *c.TIFF) Failure!void {
+        var stat: system.struct_stat = undefined;
+        if (runtime.files.fstat(c.TIFFFileno(tif), &stat) != 0) return error.UnreadableImage;
+        if (!std.meta.eql(source_file.Stamp.fromStat(stat), self.stamp)) return error.SourceChanged;
+        const header = (try Header.read(tif)) orelse return error.SourceChanged;
+        if (!std.meta.eql(header, self.header)) return error.SourceChanged;
     }
     pub fn deinit(self: *Plan) void {
         c.TIFFClose(self.tif);
     }
     pub fn workerCount(self: Plan, requested: usize, measured: bool) usize {
-        const rows = std.math.divCeil(usize, self.height, self.block_h) catch unreachable;
-        return if (!measured and @as(u64, self.width) * self.height < 8 * 1024 * 1024) 1 else @max(1, @min(requested, rows));
+        const rows = std.math.divCeil(usize, self.header.height, self.header.block_h) catch unreachable;
+        return if (!measured and @as(u64, self.header.width) * self.header.height < 8 * 1024 * 1024) 1 else @max(1, @min(requested, rows));
     }
     pub fn decode(self: *Plan, comptime measured: bool, allocator: std.mem.Allocator, options: Options, timings: ?*Timings) Failure!Decoded {
         if (options.no_cache and !platform.noCache(self.tif)) return error.UnreadableImage;
-        const width: usize = if (self.orientation >= 5) self.height else self.width;
-        const height: usize = if (self.orientation >= 5) self.width else self.height;
-        const rows = std.math.divCeil(usize, self.height, self.block_h) catch return error.InvalidDimensions;
+        const width: usize = if (self.header.orientation >= 5) self.header.height else self.header.width;
+        const height: usize = if (self.header.orientation >= 5) self.header.width else self.header.height;
+        const rows = std.math.divCeil(usize, self.header.height, self.header.block_h) catch return error.InvalidDimensions;
         const workers = self.workerCount(options.workers, measured);
-        const layout = try storageLayout(width, height, self.scratch_bytes, workers, options.prefix_bytes, options.row_alignment, self.profile.len);
+        const layout = try storageLayout(width, height, self.header.scratch_bytes, workers, options.prefix_bytes, options.row_alignment, self.profile.len);
         const allocation_started = if (measured) runtime.now() else 0;
         const slab: []align(64) u8 = if (options.poison_allocation) allocator.alignedAlloc(u8, .fromByteUnits(64), layout.total) catch return error.OutOfMemory else allocation: {
             const pointer = allocator.rawAlloc(layout.total, .fromByteUnits(64), @returnAddress()) orelse return error.OutOfMemory;
@@ -126,8 +140,8 @@ pub const Plan = struct {
         const cursor: *std.atomic.Value(usize) = @ptrCast(@alignCast(slab[layout.context_offset..].ptr));
         cursor.* = .init(0);
         const work: [*]BlockWork = @ptrCast(@alignCast(slab[layout.context_offset + 64 ..].ptr));
-        const use_simd = options.simd_predictor and self.predictor;
-        for (0..workers) |lane| work[lane] = .{ .cancel = options.cancel, .path = &self.name, .tif = if (lane == 0) self.tif else null, .no_cache = options.no_cache, .first_row = @intCast((rows * lane / workers) * self.block_h), .end_row = if (options.dynamic) self.height else @intCast(@min(self.height, (rows * (lane + 1) / workers) * self.block_h)), .next_row = if (options.dynamic) cursor else null, .simd_predictor = use_simd, .width = self.width, .height = self.height, .block_w = self.block_w, .block_h = self.block_h, .tiled = self.tiled, .orientation = self.orientation, .row_bytes = layout.row_bytes, .scratch = @alignCast(slab[layout.profile_offset + layout.profile_stride + layout.scratch_stride * lane ..][0..self.scratch_bytes]), .output = @ptrCast(@alignCast(pixels.ptr)) };
+        const use_simd = options.simd_predictor and self.header.predictor;
+        for (0..workers) |lane| work[lane] = .{ .plan = self, .cancel = options.cancel, .path = &self.name, .tif = if (lane == 0) self.tif else null, .no_cache = options.no_cache, .first_row = @intCast((rows * lane / workers) * self.header.block_h), .end_row = if (options.dynamic) self.header.height else @intCast(@min(self.header.height, (rows * (lane + 1) / workers) * self.header.block_h)), .next_row = if (options.dynamic) cursor else null, .simd_predictor = use_simd, .width = self.header.width, .height = self.header.height, .block_w = self.header.block_w, .block_h = self.header.block_h, .tiled = self.header.tiled, .orientation = self.header.orientation, .row_bytes = layout.row_bytes, .scratch = @alignCast(slab[layout.profile_offset + layout.profile_stride + layout.scratch_stride * lane ..][0..self.header.scratch_bytes]), .output = @ptrCast(@alignCast(pixels.ptr)) };
         if (measured) timings.?.allocation_ms = (runtime.now() - allocation_started) * 1000;
         const decode_started = if (measured) runtime.now() else 0;
         platform.run(work[0..workers], struct {
@@ -150,31 +164,13 @@ pub const Plan = struct {
             timings.?.simd_predictor = use_simd;
             timings.?.decode_wall_ms = (runtime.now() - decode_started) * 1000;
         }
+        try self.validateHandle(self.tif);
         return .{ .allocator = allocator, .slab = slab, .pixels = pixels, .profile = profile, .width = @intCast(width), .height = @intCast(height), .row_bytes = layout.row_bytes, .raw_retirement = options.raw_retirement };
     }
 };
-pub const Decoded = struct {
-    allocator: std.mem.Allocator,
-    slab: []align(64) u8,
-    pixels: []u8,
-    profile: []const u8,
-    width: u32,
-    height: u32,
-    row_bytes: usize,
-    raw_retirement: bool,
-    pub fn deinit(self: Decoded) void {
-        if (self.raw_retirement) self.allocator.rawFree(self.slab, .fromByteUnits(64), @returnAddress()) else self.allocator.free(self.slab);
-    }
-    pub fn reclaimScratch(self: Decoded) usize {
-        if (!self.raw_retirement) return 0;
-        const page: usize = @intCast(system.getpagesize());
-        const first = std.mem.alignForward(usize, @intFromPtr(self.profile.ptr) + self.profile.len, page);
-        const last = std.mem.alignBackward(usize, @intFromPtr(self.slab.ptr) + self.slab.len, page);
-        if (last > first and system.madvise(@ptrFromInt(first), last - first, (if (@import("builtin").os.tag == .macos) system.MADV_FREE else system.MADV_DONTNEED)) == 0) return last - first;
-        return 0;
-    }
-};
+pub const Decoded = @import("pixel_storage").Decoded;
 const BlockWork = struct {
+    plan: *const Plan,
     cancel: ?*const std.atomic.Value(bool) = null,
     simd_predictor: bool = false,
     next_row: ?*std.atomic.Value(usize) = null,
@@ -203,11 +199,15 @@ fn runWorker(comptime measured: bool, work: *BlockWork) void {
         work.elapsed_ms = (runtime.now() - started) * 1000;
     };
     const own_handle = work.tif == null;
-    const tif = work.tif orelse openHandle(work.path) orelse {
+    const tif = work.tif orelse openHandle(std.mem.span(work.path)) orelse {
         work.failure = error.DecodeFailed;
         return;
     };
     defer if (own_handle) c.TIFFClose(tif);
+    work.plan.validateHandle(tif) catch |err| {
+        work.failure = err;
+        return;
+    };
     if (work.no_cache and !platform.noCache(tif)) {
         work.failure = error.UnreadableImage;
         return;
@@ -247,7 +247,7 @@ fn decodeBlocks(comptime measured: bool, work: *BlockWork, tif: *c.TIFF) Failure
                 work.timings.blocks_ms += (conversion_started - block_started) * 1000;
                 work.timings.blocks += 1;
             }
-            if (decoded <= 0) return error.DecodeFailed;
+            if (decoded <= 0 or @as(usize, @intCast(decoded)) > scratch.len) return error.DecodeFailed;
             const raw: [*]const u16 = @ptrCast(@alignCast(scratch.ptr));
             const rows = @min(block_h, height - by);
             const columns = @min(block_w, width - bx);
@@ -322,6 +322,7 @@ pub fn storageLayout(width: usize, height: usize, scratch: usize, workers: usize
     const raw_row = std.math.mul(usize, width, 8) catch return error.SizeOverflow;
     const row = if (row_alignment == 64) try align64(raw_row) else raw_row;
     const pixels = std.math.mul(usize, row, height) catch return error.SizeOverflow;
+    if (pixels > std.math.maxInt(isize)) return error.SizeOverflow;
     const stride = try align64(scratch);
     const prefix = try align64(prefix_bytes);
     const profile = try align64(profile_bytes);
@@ -329,5 +330,33 @@ pub fn storageLayout(width: usize, height: usize, scratch: usize, workers: usize
     const base = std.math.add(usize, profile_offset, profile) catch return error.SizeOverflow;
     const context = std.math.add(usize, base, std.math.mul(usize, stride, workers) catch return error.SizeOverflow) catch return error.SizeOverflow;
     const contexts = std.math.mul(usize, @sizeOf(BlockWork), workers) catch return error.SizeOverflow;
-    return .{ .row_bytes = row, .pixel_bytes = pixels, .profile_offset = profile_offset, .profile_stride = profile, .scratch_stride = stride, .context_offset = context, .total = std.math.add(usize, std.math.add(usize, context, 64) catch return error.SizeOverflow, contexts) catch return error.SizeOverflow };
+    const total = std.math.add(usize, std.math.add(usize, context, 64) catch return error.SizeOverflow, contexts) catch return error.SizeOverflow;
+    if (total > std.math.maxInt(isize)) return error.SizeOverflow;
+    return .{ .row_bytes = row, .pixel_bytes = pixels, .profile_offset = profile_offset, .profile_stride = profile, .scratch_stride = stride, .context_offset = context, .total = total };
+}
+
+test "TIFF helpers reject path replacement and header drift before conversion" {
+    var path: ["/tmp/yekk-tiff-XXXXXX".len:0]u8 = "/tmp/yekk-tiff-XXXXXX".*;
+    const fd = system.mkstemp(&path);
+    try std.testing.expect(fd >= 0);
+    _ = system.close(fd);
+    _ = system.unlink(&path);
+    defer _ = system.unlink(&path);
+    var first: [4096]u8 = undefined;
+    var second: [4096]u8 = undefined;
+    try std.testing.expect(system.realpath("tests/fixtures/rgb16-orientation1.tif", &first) != null);
+    try std.testing.expect(system.realpath("tests/fixtures/rgb16-orientation6.tif", &second) != null);
+    try std.testing.expectEqual(@as(c_int, 0), system.symlink(@ptrCast(&first), &path));
+    var plan = (try Plan.open(std.mem.span(@as([*:0]const u8, &path)))).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.workerCount(2, true));
+    _ = system.unlink(&path);
+    try std.testing.expectEqual(@as(c_int, 0), system.symlink(@ptrCast(&second), &path));
+    var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var timing: Timings = .{};
+    try std.testing.expectError(error.SourceChanged, plan.decode(true, allocator.allocator(), .{ .workers = 2, .poison_allocation = true }, &timing));
+    try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    try std.testing.expect(c.TIFFSetField(plan.tif, 256, @as(u32, plan.header.width + 1)) != 0);
+    try std.testing.expectError(error.SourceChanged, plan.decode(true, allocator.allocator(), .{ .workers = 1, .poison_allocation = true }, &timing));
+    try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
 }

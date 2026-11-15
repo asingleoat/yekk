@@ -1,5 +1,8 @@
 # Testing and measurement
 
+See [image input checks](input-safety.md) for the decoder trust boundary and
+the supervised malformed-file corpus.
+
 Run commands from the repository root inside the Nix development shell.
 Store local reports, captures and profiles under ignored `dist/` paths.
 
@@ -184,7 +187,8 @@ Save a comparison plan as `dist/plan.json`:
 
 `workers: null` keeps the binary's automatic worker budget.
 The `process` metric measures the whole headless process, including startup and
-cleanup. `decode` measures the decoder record.
+cleanup. `decode` measures the decoder record. `load` measures the full source
+load before frame preparation; it includes decoder setup and decoded pixel storage.
 `width` and `height` specify backing pixels. `mode` selects the benchmark workload.
 The `steady` metric uses median preparation time after four warmup frames per process.
 The analyzer then takes the faster process result for each variant within a group.

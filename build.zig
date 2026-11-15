@@ -33,8 +33,9 @@ pub fn build(b: *std.Build) !void {
         target = b.resolveTargetQuery(query);
     }
     const optimize = b.standardOptimizeOption(.{});
+    const raster = b.createModule(.{ .root_source_file = b.path("src/raster.zig"), .target = target, .optimize = optimize });
     const portable = b.option(bool, "portable-linux", "Prefer static image libraries for the portable Linux release") orelse false;
-    if (target.result.os.tag == .linux) return buildLinux(b, target, optimize, portable);
+    if (target.result.os.tag == .linux) return buildLinux(b, target, optimize, portable, raster);
     if (portable) return error.PortableLinuxRequiresLinuxTarget;
     if (target.result.os.tag != .macos) return error.UnsupportedPlatform;
     const sdk = b.graph.environ_map.get("SDKROOT") orelse return error.EnterNixDevelopmentShell;
@@ -53,13 +54,18 @@ pub fn build(b: *std.Build) !void {
     const system = translated.createModule();
     const services = b.createModule(.{ .root_source_file = b.path("src/platform/runtime.zig"), .target = target, .optimize = optimize, .link_libc = true });
     services.addImport("system", system);
-    const tiff = try tiffModule(b, target, optimize, system, services, portable);
+    const source = sourceModule(b, target, optimize, system, services, raster);
+    const tiff = try tiffModule(b, target, optimize, system, services, portable, raster, source);
+    const pnm = pnmModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, tiff.import_table.get("parallel").?);
     bindings.addImport("objc-c", system);
     const root = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     root.addImport("objc", bindings);
     root.addImport("tiff_pixels", tiff);
     root.addImport("system", system);
     root.addImport("runtime", services);
+    root.addImport("source", source);
+    root.addImport("pnm", pnm);
+    root.addImport("raster", raster);
     const geometry = b.createModule(.{ .root_source_file = b.path("src/geometry.zig"), .target = target, .optimize = optimize });
     root.addImport("geometry", geometry);
     const runtime_options = b.addOptions();
@@ -90,6 +96,11 @@ pub fn build(b: *std.Build) !void {
     catalog_root.addImport("runtime", services);
     const catalog_tests = b.addTest(.{ .root_module = catalog_root });
     const test_step = b.step("test", "Test shared policies and native decoder fixtures");
+    linkNative(b, tiff, sdk);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tiff })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = raster })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pnm })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("bmp").? })).step);
     test_step.dependOn(&run_core.step);
     test_step.dependOn(&b.addRunArtifact(catalog_tests).step);
     const cache_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("src/cache.zig"), .target = target, .optimize = optimize }) });
@@ -108,7 +119,7 @@ pub fn build(b: *std.Build) !void {
     const command_tests = b.addTest(.{ .root_module = command_root });
     test_step.dependOn(&b.addRunArtifact(command_tests).step);
     inline for (.{ "cli", "session_input", "source", "navigation", "view_actions", "hook_execution", "color" }) |name| {
-        const shared = b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
+        const shared = if (comptime std.mem.eql(u8, name, "source")) source else b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
         shared.addImport("system", system);
         shared.addImport("runtime", services);
         shared.addImport("geometry", geometry);
@@ -123,6 +134,9 @@ pub fn build(b: *std.Build) !void {
     decoder_root.addImport("system", system);
     decoder_root.addImport("runtime", services);
     decoder_root.addImport("tiff_pixels", tiff);
+    decoder_root.addImport("raster", raster);
+    decoder_root.addImport("source", source);
+    decoder_root.addImport("pnm", pnm);
     linkNative(b, decoder_root, sdk);
     const decoder_tests = b.addTest(.{ .root_module = decoder_root });
     test_step.dependOn(&b.addRunArtifact(decoder_tests).step);
@@ -132,6 +146,9 @@ pub fn build(b: *std.Build) !void {
     presentation_root.addImport("system", system);
     presentation_root.addImport("runtime", services);
     presentation_root.addImport("tiff_pixels", tiff);
+    presentation_root.addImport("raster", raster);
+    presentation_root.addImport("source", source);
+    presentation_root.addImport("pnm", pnm);
     const presentation_options = b.addOptions();
     presentation_options.addOption(bool, "gpu", b.option(bool, "test-gpu", "Also verify Core Image GPU color/sampling on this machine") orelse false);
     presentation_root.addOptions("test_options", presentation_options);
@@ -145,6 +162,9 @@ pub fn build(b: *std.Build) !void {
     bench_root.addImport("system", system);
     bench_root.addImport("runtime", services);
     bench_root.addImport("tiff_pixels", tiff);
+    bench_root.addImport("raster", raster);
+    bench_root.addImport("source", source);
+    bench_root.addImport("pnm", pnm);
     bench_root.addOptions("build_options", runtime_options);
     bench_root.addImport("objc", bindings);
     bench_root.addLibraryPath(.{ .cwd_relative = tiff_path });
@@ -176,12 +196,14 @@ pub fn build(b: *std.Build) !void {
     }
 }
 
-fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, portable: bool) !void {
+fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, portable: bool, raster: *std.Build.Module) !void {
     const translated = b.addTranslateC(.{ .root_source_file = b.path("src/platform/posix.h"), .target = target, .optimize = optimize });
     const system = translated.createModule();
     const services = b.createModule(.{ .root_source_file = b.path("src/platform/runtime.zig"), .target = target, .optimize = optimize, .link_libc = true });
     services.addImport("system", system);
-    const tiff = try tiffModule(b, target, optimize, system, services, portable);
+    const source = sourceModule(b, target, optimize, system, services, raster);
+    const tiff = try tiffModule(b, target, optimize, system, services, portable, raster, source);
+    const pnm = pnmModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, tiff.import_table.get("parallel").?);
     const runtime_options = b.addOptions();
     const use_debug_allocator = b.option(bool, "debug-allocator", "Use the thread-safe debug allocator and fail on owned leaks") orelse false;
     runtime_options.addOption(bool, "debug_allocator", use_debug_allocator);
@@ -189,6 +211,8 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const root = b.createModule(.{ .root_source_file = b.path("src/linux_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     root.addImport("system", system);
     root.addImport("runtime", services);
+    root.addImport("source", source);
+    root.addImport("pnm", pnm);
     const geometry = b.createModule(.{ .root_source_file = b.path("src/geometry.zig"), .target = target, .optimize = optimize });
     root.addImport("geometry", geometry);
     const color = b.createModule(.{ .root_source_file = b.path("src/color.zig"), .target = target, .optimize = optimize });
@@ -206,6 +230,9 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     native.addImport("geometry", geometry);
     native.addImport("color", color);
     native.addImport("tiff_pixels", tiff);
+    native.addImport("raster", raster);
+    native.addImport("source", source);
+    native.addImport("pnm", pnm);
     const runtime_module = runtime_options.createModule();
     native.addImport("build_options", runtime_module);
     try linkLinux(b, native, portable);
@@ -228,8 +255,16 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     run.addPassthruArgs();
     b.step("run", "Open a viewing session").dependOn(&run.step);
     const tests = b.step("test", "Test shared navigation, catalog, hooks and Linux decoding");
+    const tiff_tests = b.addTest(.{ .root_module = tiff });
+    linuxLibC(b, tiff_tests);
+    tests.dependOn(&b.addRunArtifact(tiff_tests).step);
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = raster })).step);
+    const pnm_tests = b.addTest(.{ .root_module = pnm });
+    linuxLibC(b, pnm_tests);
+    tests.dependOn(&b.addRunArtifact(pnm_tests).step);
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("bmp").? })).step);
     inline for (.{ "core", "catalog", "cache", "actions", "geometry", "options", "hooks", "commands", "sessions", "navigation", "view_actions", "hook_execution", "cli", "session_input", "source", "linux_controls", "linux_menu", "color" }) |name| {
-        const module = if (comptime std.mem.eql(u8, name, "geometry")) geometry else if (comptime std.mem.eql(u8, name, "color")) color else b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
+        const module = if (comptime std.mem.eql(u8, name, "geometry")) geometry else if (comptime std.mem.eql(u8, name, "color")) color else if (comptime std.mem.eql(u8, name, "source")) source else b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
         module.addImport("system", system);
         module.addImport("runtime", services);
         if (comptime !std.mem.eql(u8, name, "geometry")) module.addImport("geometry", geometry);
@@ -240,6 +275,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const decoder_tests = b.createModule(.{ .root_source_file = b.path("src/linux_app.zig"), .target = target, .optimize = optimize, .link_libc = true });
     decoder_tests.addImport("system", system);
     decoder_tests.addImport("runtime", services);
+    decoder_tests.addImport("source", source);
     decoder_tests.addImport("geometry", geometry);
     decoder_tests.addImport("linux", native);
     decoder_tests.addImport("build_options", runtime_module);
@@ -325,18 +361,44 @@ fn linkNative(b: *std.Build, module: *std.Build.Module, sdk: []const u8) void {
     inline for (.{ "AppKit", "Foundation", "QuartzCore", "CoreGraphics", "CoreImage", "Metal", "IOSurface", "ImageIO", "CoreFoundation", "Accelerate" }) |framework| module.linkFramework(framework, .{});
 }
 
-fn tiffModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system: *std.Build.Module, services: *std.Build.Module, portable: bool) !*std.Build.Module {
+fn tiffModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system: *std.Build.Module, services: *std.Build.Module, portable: bool, raster: *std.Build.Module, source: *std.Build.Module) !*std.Build.Module {
     const bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/tiff-bindings.h"), .target = target, .optimize = optimize });
     const include = b.graph.environ_map.get("YEKK_TIFF_INCLUDE") orelse std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=includedir", "libtiff-4" }), " \t\r\n");
     bindings.addSystemIncludePath(.{ .cwd_relative = include });
     if (target.result.os.tag == .macos) if (b.graph.environ_map.get("SDKROOT")) |sdk| bindings.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
     const module = b.createModule(.{ .root_source_file = b.path("src/tiff_pixels.zig"), .target = target, .optimize = optimize, .link_libc = true });
     module.addImport("tiff_bindings", bindings.createModule());
+    module.addImport("parallel", b.createModule(.{ .root_source_file = b.path("src/platform/parallel.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     module.addImport("system", system);
     module.addImport("runtime", services);
+    module.addImport("raster", raster);
+    module.addImport("source", source);
+    const storage = b.createModule(.{ .root_source_file = b.path("src/pixel_storage.zig"), .target = target, .optimize = optimize });
+    storage.addImport("system", system);
+    module.addImport("pixel_storage", storage);
     const library = b.graph.environ_map.get("YEKK_TIFF_LIB") orelse std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=libdir", "libtiff-4" }), " \t\r\n");
     module.addLibraryPath(.{ .cwd_relative = library });
     module.addRPath(.{ .cwd_relative = library });
     module.linkSystemLibrary("tiff", .{ .use_pkg_config = .no, .preferred_link_mode = if (portable) .static else .dynamic, .search_strategy = if (portable) .mode_first else .paths_first });
+    return module;
+}
+
+fn sourceModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system: *std.Build.Module, services: *std.Build.Module, raster: *std.Build.Module) *std.Build.Module {
+    const module = b.createModule(.{ .root_source_file = b.path("src/source.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    module.addImport("system", system);
+    module.addImport("runtime", services);
+    const bmp = b.createModule(.{ .root_source_file = b.path("src/bmp.zig"), .target = target, .optimize = optimize });
+    bmp.addImport("raster", raster);
+    module.addImport("bmp", bmp);
+    return module;
+}
+
+fn pnmModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, source: *std.Build.Module, raster: *std.Build.Module, storage: *std.Build.Module, parallel: *std.Build.Module) *std.Build.Module {
+    const module = b.createModule(.{ .root_source_file = b.path("src/pnm.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    module.addImport("source", source);
+    module.addImport("raster", raster);
+    module.addImport("pixel_storage", storage);
+    module.addImport("parallel", parallel);
+    module.addImport("system", source.import_table.get("system").?);
     return module;
 }
