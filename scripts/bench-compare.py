@@ -32,8 +32,8 @@ comparisons = plan['comparisons']
 if not comparisons or len({c['name'] for c in comparisons}) != len(comparisons):
     parser.error('comparison names must be nonempty and unique')
 for c in comparisons:
-    if c['metric'] not in ['first_fit', 'steady', 'steady_even']:
-        parser.error('metric must be first_fit, steady or steady_even')
+    if c['metric'] not in ['process', 'decode', 'first_fit', 'steady', 'steady_even']:
+        parser.error('metric must be process, decode, first_fit, steady or steady_even')
     for key in ['control', 'candidate']:
         c[key] = str(Path(c[key]).resolve(strict=True))
 image = Path(plan['image']).resolve(strict=True)
@@ -73,9 +73,11 @@ def record_run(block, result):
 
 def run(c, label):
     executable = c['control' if label == 'A' else 'candidate']
-    command = [executable, c['mode'], str(image), '--workers', str(plan.get('workers', 8)),
+    command = [executable, c['mode'], str(image),
                '--width', str(plan.get('width', 3840)), '--height', str(plan.get('height', 2160)),
                '--iterations', str(c.get('iterations', plan.get('iterations', 64)))]
+    if plan.get('workers', 8) is not None:
+        command.extend(['--workers', str(plan.get('workers', 8))])
     before = cpu()
     started = time.monotonic()
     try:
@@ -100,13 +102,18 @@ def run(c, label):
         result['error'] = 'nonzero process status'
         return result
     frames = [r for r in result['records'] if r['mode'] == 'prepare']
-    samples = [r['wall_ms'] for r in frames if (r['step'] == 0 if c['metric'] == 'first_fit' else r['step'] >= 4 and (c['metric'] != 'steady_even' or r['step'] % 2 == 0))]
+    if c['metric'] == 'process':
+        samples = [result['process_wall_ms']]
+    elif c['metric'] == 'decode':
+        samples = [r['wall_ms'] for r in result['records'] if r['mode'] == 'decode']
+    else:
+        samples = [r['wall_ms'] for r in frames if (r['step'] == 0 if c['metric'] == 'first_fit' else r['step'] >= 4 and (c['metric'] != 'steady_even' or r['step'] % 2 == 0))]
     if not samples or any(not math.isfinite(x) or x < 0 for x in samples):
         result['error'] = 'missing or invalid timing samples'
         return result
     result['metric_unfloored_ms'] = statistics.median(samples)
     resolutions = [r['resolution_ms'] for r in result['records'] if r['mode'] == 'clock']
-    resolution = max(resolutions, default=0)
+    resolution = time.get_clock_info('monotonic').resolution * 1000 if c['metric'] == 'process' else max(resolutions, default=0)
     result['clock_resolution_ms'] = resolution
     result['metric_below_clock_resolution'] = result['metric_unfloored_ms'] < resolution
     # Cached calls can finish within one clock tick. Use an explicit upper
@@ -133,7 +140,7 @@ for i in range(args.blocks):
 report = {'started_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'protocol': {'blocks_per_comparison': args.blocks, 'processes_per_block': 4,
                        'seed': args.seed, 'order': 'balanced randomized ABBA/BAAB; comparison order shuffled each round',
                        'warmup': 'one four-process block per comparison, excluded in advance',
-                       'metric': 'per-process first-fit time or median after four warmup frames; steady_even selects even steps only',
+                       'metric': 'process wall time, decode time, first-fit time or median after four warmup frames; steady_even selects even steps only',
                        'replication_unit': 'four-process block; frame timings are not independent replicates',
                        'sub_tick_policy': 'per-process median below the reported clock resolution is conservatively floored to that resolution; raw values retained',
                        'stopping': 'fixed in advance; no significance-based stopping or timing exclusions',

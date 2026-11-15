@@ -80,7 +80,7 @@ def analyze(report, draws=20000, clock_resolution_ms=0):
             results[comparison['name']][name + '_below_resolution_processes'] = sum(r.get('metric_unfloored_ms', r['metric_ms']) < max(clock_resolution_ms, r.get('clock_resolution_ms', 0)) for r in runs)
             # Includes first-use frames deliberately; the headline estimate uses
             # the matched workloads and warmup policy defined by the run plan.
-            results[comparison['name']][name + '_maximum_recorded_frame_ms'] = max(r['wall_ms'] for r in frames)
+            results[comparison['name']][name + '_maximum_recorded_frame_ms'] = max((r['wall_ms'] for r in frames), default=None)
     return {
         'method': 'median of within-quartet paired minimum log ratios; 3-quartet circular block bootstrap; balanced-orientation signed-count randomization',
         'draws': draws, 'clock_resolution_override_ms': clock_resolution_ms, 'analysis': results,

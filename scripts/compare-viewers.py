@@ -31,6 +31,9 @@ def chart(source, output):
     )
     with source.open() as stream:
         rows = list(csv.DictReader(stream))
+    report = json.loads(source.with_suffix(".json").read_text())
+    if file_digest(source) != report["measurement_csv_sha256"]:
+        raise ValueError("CSV does not match its report metadata")
     viewers = [("yekk", "Yekk"), ("feh", "feh"), ("imv", "imv")]
     phases = [
         (range(0, 3), "Open + inspect 1 photo", "#1466a3"),
@@ -38,11 +41,21 @@ def chart(source, output):
         (range(9, 14), "Return + inspect 2 photos", "#28774e"),
     ]
     fig, axes = plt.subplots(
-        2, 2, figsize=(10, 6.6), gridspec_kw={"width_ratios": [3.4, 1]}
+        2, 2, figsize=(10, 6.8), gridspec_kw={"width_ratios": [3.4, 1]}
     )
     for (dataset, title), (timing, memory) in zip(
-        [("tiff", "239 MP TIFF scans"), ("jpeg", "23–24 MP JPEG copies")], axes
+        [("tiff", "TIFF scans"), ("jpeg", "JPEG copies")], axes
     ):
+        sizes = [
+            round(r["width"] * r["height"] / 1e6)
+            for r in report["corpus"]
+            if r["dataset"] == dataset
+        ]
+        megapixels = (
+            str(min(sizes))
+            if min(sizes) == max(sizes)
+            else f"{min(sizes)}–{max(sizes)}"
+        )
         subset = [r for r in rows if r["dataset"] == dataset]
         for y, (viewer, label) in enumerate(viewers):
             runs = [
@@ -79,7 +92,7 @@ def chart(source, output):
             memory.barh(y, max(peaks), color="#666666", height=0.48)
             memory.plot(peaks, [y] * len(peaks), "|", color="black", markersize=9)
             memory.text(max(peaks), y, f" {max(peaks):.2g}", va="center", fontsize=9)
-        timing.set_title(title, loc="left", fontweight="bold")
+        timing.set_title(f"{megapixels} MP {title}", loc="left", fontweight="bold")
         timing.set_xlabel(
             "Total time waiting for window pixels (seconds; lower is better)"
         )
@@ -109,11 +122,12 @@ def chart(source, output):
         0.02,
         0.025,
         "Time bars: fastest complete run of six. Ticks: all six runs. Fixed inspection pauses excluded. RAM bars: maximum peak RSS.\n"
-        "Private Xvfb; CPU rendering; warm file cache. Ryzen 9 7950X, 125 GiB usable RAM. Each time panel has its own scale.\n"
+        f"{report['optimize']}; CPU target: {report['cpu_target']}. Private Xvfb; CPU rendering; warm file cache.\n"
+        f"{report['hardware']['cpu']}; {report['hardware']['usable_memory_kib'] / 1048576:.0f} GiB usable RAM. Each time panel has its own scale.\n"
         f"First 100% TIFF view in Yekk: {min(first_zoom):.0f}–{max(first_zoom):.0f} ms; {sum(x >= 200 for x in first_zoom)}/6 runs took at least 200 ms.",
         fontsize=8,
     )
-    fig.tight_layout(rect=(0, 0.13, 1, 0.93), h_pad=2.7)
+    fig.tight_layout(rect=(0, 0.16, 1, 0.93), h_pad=2.7)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         output,
@@ -142,6 +156,11 @@ p.add_argument(
 )
 p.add_argument("--yekk", type=pathlib.Path)
 p.add_argument("--calibrate", action="store_true")
+p.add_argument(
+    "--build-mode",
+    choices=["Debug", "ReleaseSafe", "ReleaseFast", "ReleaseSmall"],
+    help="record the supplied Yekk binary build mode",
+)
 p.add_argument("--rounds", type=int, default=6)
 p.add_argument(
     "--viewers",
@@ -158,8 +177,15 @@ if a.plot_csv:
     raise SystemExit(0)
 if not a.yekk or len(a.images) != 3:
     p.error("supply --yekk and exactly three images")
-if a.rounds < 6 or a.rounds % 6 or len(set(a.viewers)) != 3:
-    p.error("use all three viewers and a positive multiple of six rounds")
+if (
+    a.rounds < 6
+    or a.rounds % 6
+    or len(set(a.viewers)) != len(a.viewers)
+    or (not a.calibrate and len(a.viewers) != 3)
+):
+    p.error(
+        "timing requires all three viewers and a positive multiple of six rounds; calibration permits a subset"
+    )
 if (
     not math.isfinite(a.dwell)
     or not math.isfinite(a.settle)
@@ -562,6 +588,7 @@ with tempfile.TemporaryDirectory(prefix="yekk-viewer-comparison-") as tmp:
             random.Random(20261114).shuffle(orders)
             plan = [orders[i % len(orders)] for i in range(a.rounds)]
             metadata = dict(
+                build_mode=a.build_mode,
                 images=[
                     dict(name=f.name, bytes=f.stat().st_size, sha256=file_digest(f))
                     for f in a.images
