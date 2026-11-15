@@ -28,7 +28,7 @@ See the [method, all timings and limits](docs/viewer-comparison.md).
 
 ```sh
 nix develop path:.
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseFast
 ./zig-out/bin/yekk /path/to/photos
 ```
 

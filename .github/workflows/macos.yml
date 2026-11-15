@@ -26,7 +26,7 @@ jobs:
             python3 scripts/stability.py --repeats 2 --cycles 256 --output dist/stability.json
           '
       - name: Build portable development DMG
-        run: nix develop path:. --command zig build dmg -Doptimize=ReleaseSafe
+        run: nix develop path:. --command zig build dmg -Doptimize=ReleaseFast -Dcpu=baseline
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: Yekk-${{ runner.arch }}

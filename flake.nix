@@ -78,11 +78,14 @@
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/yekk-zig-global"
               export ZIG_LOCAL_CACHE_DIR="$TMPDIR/yekk-zig-local"
               unset NIX_CFLAGS_COMPILE NIX_LDFLAGS
-              zig build -j"$NIX_BUILD_CORES" -Doptimize=ReleaseSafe --prefix "$out"
+              zig build -j"$NIX_BUILD_CORES" -Doptimize=ReleaseFast -Dcpu=baseline --prefix "$out"
               runHook postBuild
             '';
             doCheck = true;
-            checkPhase = "zig build test -j\"$NIX_BUILD_CORES\" -Doptimize=ReleaseSafe";
+            checkPhase = ''
+              zig build test -j"$NIX_BUILD_CORES" -Doptimize=ReleaseFast -Dcpu=baseline
+              zig build test -j"$NIX_BUILD_CORES" -Doptimize=ReleaseSafe -Dcpu=baseline
+            '';
             postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               substituteInPlace "$out/share/applications/yekk.desktop" \
                 --replace-fail 'Exec=yekk %F' "Exec=$out/bin/yekk %F"
@@ -124,10 +127,13 @@
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/yekk-zig-global"
               export ZIG_LOCAL_CACHE_DIR="$TMPDIR/yekk-zig-local"
               unset NIX_CFLAGS_COMPILE NIX_LDFLAGS YEKK_FONT_FILE
-              zig build -j"$NIX_BUILD_CORES" -Doptimize=ReleaseSafe -Dcpu=baseline -Dportable-linux=true --prefix "$out"
+              zig build -j"$NIX_BUILD_CORES" -Doptimize=ReleaseFast -Dcpu=baseline -Dportable-linux=true --prefix "$out"
               runHook postBuild
             '';
-            checkPhase = ''zig build test -j"$NIX_BUILD_CORES" -Doptimize=ReleaseSafe -Dcpu=baseline -Dportable-linux=true'';
+            checkPhase = ''
+              zig build test -j"$NIX_BUILD_CORES" -Doptimize=ReleaseFast -Dcpu=baseline -Dportable-linux=true
+              zig build test -j"$NIX_BUILD_CORES" -Doptimize=ReleaseSafe -Dcpu=baseline -Dportable-linux=true
+            '';
             postFixup = "";
             dontPatchELF = true;
             dontStrip = true;

@@ -87,6 +87,13 @@ once per frame and selects opaque or alpha-processing code outside pixel loops.
 Workers notify the UI when results are ready. Normal requests need no polling delay.
 See [presentation](presentation.md) for native display surfaces and color calculations.
 
+## Build mode
+
+Production builds use `ReleaseFast`. Compare `ReleaseSmall` with the same input,
+CPU target and decoder settings before selecting it. Smaller code can improve
+instruction-cache use, but it can also reduce loop optimization.
+Use paired minimum times and keep slow samples. See [benchmarking](validation.md#comparing-builds).
+
 ## Measurement
 
 Remove repeated work before optimizing instructions. Measure elapsed time,

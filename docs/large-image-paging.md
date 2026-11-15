@@ -54,8 +54,8 @@ RGB16 stores 16 bits for each red, green and blue sample.
 
 ```sh
 nix develop path:.
-zig build tiff-probe -Doptimize=ReleaseSafe -- generate /tmp/yekk-tiled.tif tiles
-zig build tiff-probe -Doptimize=ReleaseSafe -- blocks-cached /tmp/yekk-tiled.tif --verify-synthetic
+zig build tiff-probe -Doptimize=ReleaseFast -- generate /tmp/yekk-tiled.tif tiles
+zig build tiff-probe -Doptimize=ReleaseFast -- blocks-cached /tmp/yekk-tiled.tif --verify-synthetic
 ```
 
 Generation refuses to overwrite files. Other layouts are `strips` and

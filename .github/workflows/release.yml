@@ -25,7 +25,7 @@ jobs:
       - name: Test and build DMG (no Developer ID or notarization)
         run: |
           nix build path:. --no-link
-          nix develop path:. --command zig build test dmg -Doptimize=ReleaseSafe -Dcpu=baseline
+          nix develop path:. --command zig build test dmg -Doptimize=ReleaseFast -Dcpu=baseline
       - name: Verify viewing from the mounted DMG
         run: nix develop path:. --command python3 scripts/macos-release-test.py --package dist --output dist/macos-release-validation.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

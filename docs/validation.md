@@ -8,7 +8,7 @@ Store local reports, captures and profiles under ignored `dist/` paths.
 ```sh
 nix develop path:.
 zig build test -Doptimize=ReleaseSafe
-zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseFast
 sh scripts/catalog-test.sh
 ```
 
@@ -100,7 +100,7 @@ drawing buffer; it can differ from a logical window-coordinate unit.
 On macOS, build the benchmark and run a decode:
 
 ```sh
-zig build build-bench-image -Doptimize=ReleaseSafe
+zig build build-bench-image -Doptimize=ReleaseFast
 ./zig-out/bin/yekk-bench-image decode /path/to/scan.tif --workers 4
 python3 scripts/bench-image.py /path/to/scan.tif --workers 4 --output dist/decode.jsonl
 ```
@@ -143,6 +143,10 @@ The **control** is the reference binary; the **candidate** contains the change.
 Set warmup and sample counts before testing. Use minimum times to estimate
 throughput without host noise. Report slow requests separately and name the timed stage.
 
+Record the build mode. Production uses `ReleaseFast`; compare `ReleaseSmall`
+before selecting it for a target. Use `ReleaseSafe` and the debug allocator for
+checked validation, separate from performance measurements.
+
 An ABBA group runs control, candidate, candidate and control.
 A BAAB group reverses that order. Randomized groups reduce time-order bias.
 Include an identical-binary comparison to check the method.
@@ -175,6 +179,9 @@ Save a comparison plan as `dist/plan.json`:
 }
 ```
 
+`workers: null` keeps the binary's automatic worker budget.
+The `process` metric measures the whole headless process, including startup and
+cleanup. `decode` measures the decoder record.
 `width` and `height` specify backing pixels. `mode` selects the benchmark workload.
 The `steady` metric uses median preparation time after four warmup frames per process.
 The analyzer then takes the faster process result for each variant within a group.

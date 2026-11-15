@@ -27,7 +27,7 @@ A DMG is a disk image containing `Yekk.app` and license information.
 Mounting it makes those files available as a volume.
 
 ```sh
-nix develop path:. -c zig build test dmg -Doptimize=ReleaseSafe -Dcpu=baseline
+nix develop path:. -c zig build test dmg -Doptimize=ReleaseFast -Dcpu=baseline
 nix develop path:. -c python3 scripts/macos-release-test.py \
   --package dist --output dist/macos-release-validation.json
 ```
