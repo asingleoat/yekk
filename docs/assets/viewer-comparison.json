@@ -1,0 +1,402 @@
+{
+  "application_source_commit": "ce189c01bc96a2dd84e14e067fd48288196c77b7",
+  "yekk_binary_sha256": "e0862d921450c65883e90369e30fe905c546f7fed99e43865af09bcc9a2e6211",
+  "flake_lock_sha256": "466f9a53453ae935bb257d37ff7c842c2568a12793890897e4fc2c75c5f303b6",
+  "started_utc": {
+    "tiff": "2026-11-15T05:06:39Z",
+    "jpeg": "2026-11-15T05:16:26Z"
+  },
+  "build": "ReleaseSafe; debug allocator disabled",
+  "benchmark_harness_commit": "dde84faff40b30f6ab92d65a059bf542eeaf4d73",
+  "benchmark_harness_sha256": "7c2753d9cd57ca21aacd7c32755b86d7bb8b240e1a05f6e670439fa492a9ec1b",
+  "hardware": {
+    "cpu": "AMD Ryzen 9 7950X 16-Core Processor",
+    "usable_memory_kib": 131032860,
+    "kernel": "Linux-6.12.115-x86_64-with-glibc2.44"
+  },
+  "versions": {
+    "zig": "0.18.0-dev.470+6817928c3",
+    "python": "3.14.8",
+    "pillow": "12.3.0",
+    "matplotlib": "3.11.2",
+    "numpy": "2.5.3",
+    "feh": "feh version 3.13.1",
+    "imv": "Version: 5.0.1",
+    "vips": "vips-8.18.7",
+    "openbox": "Openbox 3.6.1",
+    "feh_binary_sha256": "14df6e67baa539b2780ccb986728be0c2db0ccddc6129307e31537e423d8d6e9",
+    "imv_binary_sha256": "c9edf13b5192024d915c44a9d6ad9cc1b1de65cc3c5f9692e1b797bb71d796e3",
+    "relevant_dependency_packages": [
+      "libjpeg-turbo-3.2.0",
+      "libtiff-4.7.2",
+      "imlib2-1.12.7",
+      "libjpeg-turbo-3.2.0-bin"
+    ]
+  },
+  "method": {
+    "rounds": 6,
+    "viewer_order": [
+      [
+        "imv",
+        "yekk",
+        "feh"
+      ],
+      [
+        "imv",
+        "feh",
+        "yekk"
+      ],
+      [
+        "feh",
+        "yekk",
+        "imv"
+      ],
+      [
+        "feh",
+        "imv",
+        "yekk"
+      ],
+      [
+        "yekk",
+        "imv",
+        "feh"
+      ],
+      [
+        "yekk",
+        "feh",
+        "imv"
+      ]
+    ],
+    "dwell_fit_seconds": 2,
+    "dwell_actual_seconds": 1,
+    "poll_sleep_ms": 2,
+    "display": "private Xvfb, 1280x800x24, 96dpi; 960x640 client; CPU rendering",
+    "file_cache": "primed before each new process; all viewer physical_read_bytes observations were zero",
+    "endpoint": "XGetImage RGB matches an untimed, viewer-specific reference for the workflow step",
+    "primary_metric": "sum of all 14 action times; minimum complete run of six; fixed pauses excluded",
+    "memory": "maximum sampled VmHWM at action completion; viewer process only",
+    "feh_cache_mib": 2047,
+    "yekk_cache": "defaults, with prefetch",
+    "imv_cache": "defaults",
+    "other_jobs": "unrelated work ran during all trials",
+    "observed_load_1m_range": [
+      15.32470703125,
+      24.25
+    ]
+  },
+  "corpus": [
+    {
+      "dataset": "tiff",
+      "photo": 1,
+      "width": 17151,
+      "height": 13958,
+      "bits_per_channel": [
+        16,
+        16,
+        16
+      ],
+      "compression": "Deflate",
+      "bytes": 1236749890,
+      "sha256": "aeefbfde04877e570e02b15f58c43cf09a377660460f74ac129be1169aafc25f"
+    },
+    {
+      "dataset": "tiff",
+      "photo": 2,
+      "width": 17151,
+      "height": 13958,
+      "bits_per_channel": [
+        16,
+        16,
+        16
+      ],
+      "compression": "Deflate",
+      "bytes": 1091548274,
+      "sha256": "c2f396b5db5a7f01367812c47ab38831afde6b672e4ed50372e6698bcbfb3990"
+    },
+    {
+      "dataset": "tiff",
+      "photo": 3,
+      "width": 17283,
+      "height": 13826,
+      "bits_per_channel": [
+        16,
+        16,
+        16
+      ],
+      "compression": "Deflate",
+      "bytes": 1122680728,
+      "sha256": "010a6973166688d8701feaa3894cdebaad3503f55919e735dfabd776b610de10"
+    },
+    {
+      "dataset": "jpeg",
+      "photo": 1,
+      "width": 5400,
+      "height": 4395,
+      "bits_per_channel": [
+        8,
+        8,
+        8
+      ],
+      "compression": "JPEG quality 90, stripped metadata; vips thumbnail width 5400",
+      "bytes": 14222942,
+      "sha256": "09521de35e648280e991c0924b2a3b21511159e343b601dd4cdc2f0f185abe87"
+    },
+    {
+      "dataset": "jpeg",
+      "photo": 2,
+      "width": 5400,
+      "height": 4395,
+      "bits_per_channel": [
+        8,
+        8,
+        8
+      ],
+      "compression": "JPEG quality 90, stripped metadata; vips thumbnail width 5400",
+      "bytes": 5024154,
+      "sha256": "aa6a7ec95105b852e5af2b1a146e936e1bf47b188201a3346f6c2ab40d5ddccb"
+    },
+    {
+      "dataset": "jpeg",
+      "photo": 3,
+      "width": 5400,
+      "height": 4320,
+      "bits_per_channel": [
+        8,
+        8,
+        8
+      ],
+      "compression": "JPEG quality 90, stripped metadata; vips thumbnail width 5400",
+      "bytes": 5323407,
+      "sha256": "c39070ead1db0a6adad8207189ccdbad061f86ce5a762ae034d4247c934d81d8"
+    }
+  ],
+  "results": {
+    "tiff": {
+      "yekk": {
+        "best_complete_run": {
+          "trial": 5,
+          "total_wait_s": 1.382092334,
+          "parts_s": [
+            1.2728034339999998,
+            0.059867613,
+            0.049421287
+          ],
+          "peak_rss_gib": 6.0729522705078125
+        },
+        "all_total_wait_s": [
+          2.207442806,
+          2.7671511069999997,
+          2.518081006,
+          1.931763603,
+          1.79583132,
+          1.382092334
+        ],
+        "max_peak_rss_gib": 6.080055236816406,
+        "first_open_ms": [
+          1675.96322,
+          1845.726579,
+          1842.246845,
+          1463.183109,
+          1443.580984,
+          1249.587715
+        ],
+        "first_actual_ms": [
+          349.649331,
+          720.083502,
+          454.165573,
+          329.576192,
+          200.286125,
+          12.964116
+        ]
+      },
+      "feh": {
+        "best_complete_run": {
+          "trial": 5,
+          "total_wait_s": 17.568968335999998,
+          "parts_s": [
+            5.080748365,
+            10.925411888,
+            1.5628080830000002
+          ],
+          "peak_rss_gib": 4.6232452392578125
+        },
+        "all_total_wait_s": [
+          19.916029909000002,
+          20.602655355,
+          20.41470795,
+          18.455786934,
+          18.461193394,
+          17.568968335999998
+        ],
+        "max_peak_rss_gib": 4.625408172607422,
+        "first_open_ms": [
+          4801.359655,
+          5444.433349,
+          5412.900708,
+          5137.136768,
+          5246.794809,
+          4668.556495
+        ],
+        "first_actual_ms": [
+          15.51997,
+          37.811653,
+          17.02997,
+          13.078345,
+          13.584919,
+          11.426798
+        ]
+      },
+      "imv": {
+        "best_complete_run": {
+          "trial": 0,
+          "total_wait_s": 26.233632914,
+          "parts_s": [
+            4.993954084,
+            10.019313295,
+            11.220365535000001
+          ],
+          "peak_rss_gib": 4.447315216064453
+        },
+        "all_total_wait_s": [
+          26.233632914,
+          28.262463479,
+          30.951299403,
+          26.586545058,
+          29.293341376,
+          27.78836427
+        ],
+        "max_peak_rss_gib": 4.447315216064453,
+        "first_open_ms": [
+          4968.236348,
+          6236.607447,
+          7171.501185,
+          5883.625507,
+          6151.629573,
+          5954.449492
+        ],
+        "first_actual_ms": [
+          15.11339,
+          18.259566,
+          23.365016,
+          16.859495,
+          22.062799,
+          10.348688
+        ]
+      }
+    },
+    "jpeg": {
+      "yekk": {
+        "best_complete_run": {
+          "trial": 1,
+          "total_wait_s": 0.541462172,
+          "parts_s": [
+            0.45381581,
+            0.048196364000000005,
+            0.039449998
+          ],
+          "peak_rss_gib": 0.8384513854980469
+        },
+        "all_total_wait_s": [
+          0.861117951,
+          0.541462172,
+          0.6378249530000001,
+          0.666104562,
+          0.6467881630000001,
+          0.6275095860000001
+        ],
+        "max_peak_rss_gib": 0.8384513854980469,
+        "first_open_ms": [
+          705.746192,
+          437.845635,
+          488.561276,
+          546.376382,
+          527.427134,
+          499.476398
+        ],
+        "first_actual_ms": [
+          11.665478,
+          8.103257,
+          9.541749,
+          11.334318,
+          7.933192,
+          9.218564
+        ]
+      },
+      "feh": {
+        "best_complete_run": {
+          "trial": 2,
+          "total_wait_s": 0.963405889,
+          "parts_s": [
+            0.29690896,
+            0.486783107,
+            0.179713822
+          ],
+          "peak_rss_gib": 0.277496337890625
+        },
+        "all_total_wait_s": [
+          1.11369184,
+          1.0429353430000001,
+          0.963405889,
+          1.157258586,
+          1.0414610439999998,
+          1.052974561
+        ],
+        "max_peak_rss_gib": 0.2787933349609375,
+        "first_open_ms": [
+          281.896993,
+          241.715863,
+          236.054623,
+          271.263203,
+          259.664857,
+          289.461983
+        ],
+        "first_actual_ms": [
+          10.047683,
+          9.345963,
+          7.914657,
+          10.267364,
+          10.636248,
+          8.729836
+        ]
+      },
+      "imv": {
+        "best_complete_run": {
+          "trial": 1,
+          "total_wait_s": 1.244805658,
+          "parts_s": [
+            0.381847958,
+            0.399203038,
+            0.463754662
+          ],
+          "peak_rss_gib": 0.5619697570800781
+        },
+        "all_total_wait_s": [
+          2.037409286,
+          1.244805658,
+          1.362644089,
+          1.56311998,
+          1.343319854,
+          1.296096554
+        ],
+        "max_peak_rss_gib": 0.56744384765625,
+        "first_open_ms": [
+          748.065302,
+          366.170539,
+          388.518701,
+          522.751013,
+          393.401934,
+          361.769599
+        ],
+        "first_actual_ms": [
+          22.946042,
+          7.099892,
+          9.754038,
+          15.24864,
+          9.720113,
+          7.993739
+        ]
+      }
+    }
+  },
+  "measurement_csv_sha256": "3ec85eb7a3bb0b0a56bc4acb7c3d95e7cdedf920323f2140eb5fe4e8983ab8a2"
+}

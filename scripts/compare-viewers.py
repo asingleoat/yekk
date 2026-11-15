@@ -6,6 +6,7 @@ import csv
 import hashlib
 import itertools
 import json
+import math
 import os
 import pathlib
 import random
@@ -18,13 +19,16 @@ import time
 
 
 def chart(source, output):
+    """Render the published six-run TIFF/JPEG report."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 
-    matplotlib.rcParams.update({"svg.fonttype": "none", "font.size": 10})
+    matplotlib.rcParams.update(
+        {"svg.fonttype": "none", "svg.hashsalt": "yekk-viewers", "font.size": 10}
+    )
     with source.open() as stream:
         rows = list(csv.DictReader(stream))
     viewers = [("yekk", "Yekk"), ("feh", "feh"), ("imv", "imv")]
@@ -34,7 +38,7 @@ def chart(source, output):
         (range(9, 14), "Return + inspect 2 photos", "#28774e"),
     ]
     fig, axes = plt.subplots(
-        2, 2, figsize=(10, 6.3), gridspec_kw={"width_ratios": [3.4, 1]}
+        2, 2, figsize=(10, 6.6), gridspec_kw={"width_ratios": [3.4, 1]}
     )
     for (dataset, title), (timing, memory) in zip(
         [("tiff", "239 MP TIFF scans"), ("jpeg", "23–24 MP JPEG copies")], axes
@@ -96,16 +100,28 @@ def chart(source, output):
         frameon=False,
         fontsize=9,
     )
+    first_zoom = [
+        float(r["ms"])
+        for r in rows
+        if r["dataset"] == "tiff" and r["viewer"] == "yekk" and int(r["step"]) == 1
+    ]
     fig.text(
         0.02,
         0.025,
         "Time bars: fastest complete run of six. Ticks: all six runs. Fixed inspection pauses excluded. RAM bars: maximum peak RSS.\n"
-        "Private Xvfb; CPU rendering; warm file cache. Ryzen 9 7950X, 125 GiB usable RAM. Each time panel has its own scale.",
+        "Private Xvfb; CPU rendering; warm file cache. Ryzen 9 7950X, 125 GiB usable RAM. Each time panel has its own scale.\n"
+        f"First 100% TIFF view in Yekk: {min(first_zoom):.0f}–{max(first_zoom):.0f} ms; {sum(x >= 200 for x in first_zoom)}/6 runs took at least 200 ms.",
         fontsize=8,
     )
-    fig.tight_layout(rect=(0, 0.09, 1, 0.93), h_pad=2.7)
+    fig.tight_layout(rect=(0, 0.13, 1, 0.93), h_pad=2.7)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, metadata={"Date": None})
+    fig.savefig(
+        output,
+        metadata={
+            "Date": None,
+            "Title": "Yekk, feh and imv: photo-review waiting time and peak RAM",
+        },
+    )
     plt.close(fig)
 
 
@@ -144,7 +160,12 @@ if not a.yekk or len(a.images) != 3:
     p.error("supply --yekk and exactly three images")
 if a.rounds < 6 or a.rounds % 6 or len(set(a.viewers)) != 3:
     p.error("use all three viewers and a positive multiple of six rounds")
-if a.dwell < 0 or a.settle < 1:
+if (
+    not math.isfinite(a.dwell)
+    or not math.isfinite(a.settle)
+    or a.dwell < 0
+    or a.settle < 1
+):
     p.error("--dwell must be nonnegative and --settle must be at least one second")
 from Xlib import X, XK, display
 from Xlib.ext import xtest
@@ -152,6 +173,8 @@ from PIL import Image
 
 a.output.mkdir(parents=True, exist_ok=True)
 a.images = [x.resolve(strict=True) for x in a.images]
+if len(set(a.images)) != 3:
+    p.error("supply three different image files")
 a.yekk = a.yekk.resolve(strict=True)
 root = pathlib.Path(__file__).resolve().parent.parent
 sequence = [
@@ -172,7 +195,7 @@ sequence = [
 ]
 refs_path = a.output / "references.json"
 refs = json.loads(refs_path.read_text()) if refs_path.exists() else {}
-if not a.calibrate and (a.output / "measurements.jsonl").exists():
+if (a.output / "measurements.jsonl").exists():
     p.error("output already contains measurements")
 if not a.calibrate:
     for viewer in a.viewers:
@@ -185,11 +208,17 @@ def stop(proc):
     if proc is None:
         return
     if proc.poll() is None:
-        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             proc.wait(timeout=3)
 
 
@@ -399,7 +428,14 @@ with tempfile.TemporaryDirectory(prefix="yekk-viewer-comparison-") as tmp:
                         refkey = viewer + "/" + str(index) + "-" + state
                         if refkey in refs and refs[refkey] != value:
                             raise RuntimeError("state mismatch " + refkey)
-                        if max(raw) - min(raw) < 20:
+                        extrema = Image.frombytes(
+                            "RGB", (960, 640), raw, "raw", "BGRX"
+                        ).getextrema()
+                        if (
+                            max(high for _, high in extrema)
+                            - min(low for low, _ in extrema)
+                            < 20
+                        ):
                             raise RuntimeError("blank reference " + refkey)
                         if (
                             state.endswith("actual")

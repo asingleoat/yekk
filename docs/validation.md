@@ -84,6 +84,9 @@ Test physical monitors, hardware compositors and GPU drivers separately.
 
 ## Benchmarking and profiling
 
+For comparisons with other viewers, see the [photo-review task](viewer-comparison.md).
+It measures complete window pixels with the same external check for each viewer.
+
 A benchmark measures elapsed time for specified work. A profiler records where
 time or allocations occur. Run them separately so profiling overhead does not
 change the timing comparison. Finish builds first and keep source images read-only.
