@@ -7,7 +7,6 @@ import os
 import re
 from pathlib import Path
 import selectors
-import shlex
 import signal
 import struct
 import subprocess
@@ -357,9 +356,12 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
                 run(['xdotool','mousemove','--window',focus_ids['child'],'200','150'])
                 time.sleep(.05);click(1);phase[0]=3
             elif phase[0]==3 and viewers.get(focus_ids['child'],'').startswith(str(burst_folder/'b.tif')):
+                # X11 titles can update before the trace pipe is read. Wait for
+                # both release events before checking the captured trace.
+                releases=[line for line in text.splitlines() if line.startswith('INPUT ') and 'kind=8 button=1 ' in line]
+                if len(releases)<2:return
                 assert viewers[focus_ids['origin']].startswith(str(burst_folder/'b.tif')),viewers
                 assert 'VIEW index=2' not in text,text
-                releases=[line for line in text.splitlines() if line.startswith('INPUT ') and 'kind=8 button=1 ' in line]
                 assert len(releases)==2,text
                 key(focus_ids['child'],'q');phase[0]=4
         exercise('clicking an unfocused window advances exactly once',['--geometry','400x300',burst_folder],focus_click,4)
