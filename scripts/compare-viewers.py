@@ -19,7 +19,7 @@ import time
 
 
 def chart(source, output):
-    """Render the published six-run TIFF/JPEG report."""
+    """Render the published six-run report."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -40,11 +40,17 @@ def chart(source, output):
         (range(3, 9), "Advance + inspect 2 photos", "#b45415"),
         (range(9, 14), "Return + inspect 2 photos", "#28774e"),
     ]
+    datasets = [
+        (name, title)
+        for name, title in [("tiff", "TIFF scans"), ("jpeg", "JPEG copies"), ("png", "PNG copies")]
+        if name in {r["dataset"] for r in report["corpus"]}
+    ]
     fig, axes = plt.subplots(
-        2, 2, figsize=(10, 6.8), gridspec_kw={"width_ratios": [3.4, 1]}
+        len(datasets), 2, figsize=(10, 2.65 * len(datasets) + 1.5),
+        squeeze=False, gridspec_kw={"width_ratios": [3.4, 1]}
     )
     for (dataset, title), (timing, memory) in zip(
-        [("tiff", "TIFF scans"), ("jpeg", "JPEG copies")], axes
+        datasets, axes
     ):
         sizes = [
             round(r["width"] * r["height"] / 1e6)
@@ -127,7 +133,7 @@ def chart(source, output):
         f"First 100% TIFF view in Yekk: {min(first_zoom):.0f}–{max(first_zoom):.0f} ms; {sum(x >= 200 for x in first_zoom)}/6 runs took at least 200 ms.",
         fontsize=8,
     )
-    fig.tight_layout(rect=(0, 0.16, 1, 0.93), h_pad=2.7)
+    fig.tight_layout(rect=(0, 0.13 if len(datasets) == 3 else 0.16, 1, 0.94), h_pad=2.7)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(
         output,
