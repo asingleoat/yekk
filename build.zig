@@ -315,6 +315,16 @@ fn linuxLibC(b: *std.Build, artifact: *std.Build.Step.Compile) void {
 }
 
 fn linkLinux(b: *std.Build, module: *std.Build.Module, portable: bool) !void {
+    // SDL's .pc includes linker switches Zig's pkg-config parser cannot yet
+    // consume. Query the structured flag subsets and explicitly retain rpaths.
+    const flags = b.run(if (portable)
+        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libtiff-4" }
+    else
+        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11" });
+    try linkLinuxLibraries(b, module, portable, flags);
+}
+
+fn linkLinuxLibraries(b: *std.Build, module: *std.Build.Module, portable: bool, flags: []const u8) !void {
     if (portable) {
         if (module.resolved_target.?.result.cpu.arch == .aarch64) {
             module.addObjectFile(.{ .cwd_relative = b.graph.environ_map.get("YEKK_GCC_RUNTIME") orelse return error.EnterPortableLinuxBuild });
@@ -330,12 +340,6 @@ fn linkLinux(b: *std.Build, module: *std.Build.Module, portable: bool) !void {
             module.addRPath(.{ .cwd_relative = directory });
         }
     }
-    // SDL's .pc includes linker switches Zig's pkg-config parser cannot yet
-    // consume. Query the structured flag subsets and explicitly retain rpaths.
-    const flags = b.run(if (portable)
-        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libtiff-4" }
-    else
-        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11" });
     var tokens = std.mem.tokenizeAny(u8, flags, " \t\r\n");
     while (tokens.next()) |token| {
         if (std.mem.startsWith(u8, token, "-I")) module.addSystemIncludePath(.{ .cwd_relative = token[2..] }) else if (std.mem.startsWith(u8, token, "-L")) {
@@ -379,7 +383,8 @@ fn tiffModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const library = b.graph.environ_map.get("YEKK_TIFF_LIB") orelse std.mem.trim(u8, b.run(&.{ "pkg-config", "--variable=libdir", "libtiff-4" }), " \t\r\n");
     module.addLibraryPath(.{ .cwd_relative = library });
     module.addRPath(.{ .cwd_relative = library });
-    module.linkSystemLibrary("tiff", .{ .use_pkg_config = .no, .preferred_link_mode = if (portable) .static else .dynamic, .search_strategy = if (portable) .mode_first else .paths_first });
+    // Standalone decoder tests need libtiff's private archive dependencies too.
+    if (portable) try linkLinuxLibraries(b, module, true, b.run(&.{ "pkg-config", "--static", "--libs-only-L", "--libs-only-l", "libtiff-4" })) else module.linkSystemLibrary("tiff", .{ .use_pkg_config = .no });
     return module;
 }
 
