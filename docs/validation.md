@@ -139,6 +139,9 @@ Record actual read bytes. Do not flush host caches.
 
 ### Comparing builds
 
+Benchmark shared changes on Linux and macOS when possible. Report each platform
+separately. State which workloads or platforms were not measured.
+
 The **control** is the reference binary; the **candidate** contains the change.
 Set warmup and sample counts before testing. Use minimum times to estimate
 throughput without host noise. Report slow requests separately and name the timed stage.
