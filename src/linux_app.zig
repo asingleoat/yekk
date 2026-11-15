@@ -1273,7 +1273,17 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             if (action.body().len > 0 and ui.displayed_index == ui.request.index and state.controller.shown_index == ui.request.index and !ui.hook_queued) {
                 ui.pending_hook.kind = .shell;
                 ui.pending_hook.template = action.*;
-                ui.pending_hook.snapshot = .{ .path = state.catalog.entries[ui.request.index].path, .width = ui.base_width, .height = ui.base_height, .bytes = @intCast(@max(0, if (ui.displayed_stamp) |stamp| stamp.bytes else state.catalog.entries[ui.request.index].bytes)), .index = state.controller.position + 1, .count = state.controller.count, .viewport_width = @intCast(ui.request.width), .viewport_height = @intCast(ui.request.height), .offset_x = ui.request.view.pan_x, .offset_y = ui.request.view.pan_y, .zoom = ui.request.view.scale, .rotation = ui.request.rotation, .playing = state.controller.playing, .pid = posix.getpid() };
+                ui.pending_hook.snapshot = (hooks.Snapshot{
+                    .path = state.catalog.entries[ui.request.index].path,
+                    .width = ui.base_width,
+                    .height = ui.base_height,
+                    .bytes = @intCast(@max(0, if (ui.displayed_stamp) |stamp| stamp.bytes else state.catalog.entries[ui.request.index].bytes)),
+                    .index = state.controller.position + 1,
+                    .count = state.controller.count,
+                    .rotation = ui.request.rotation,
+                    .playing = state.controller.playing,
+                    .pid = posix.getpid(),
+                }).withView(ui.request.view, .{ .width = @floatFromInt(ui.request.width), .height = @floatFromInt(ui.request.height) });
                 ui.pending_hook.index = ui.request.index;
                 ui.pending_hook.reload = action.reload;
                 ui.pending_hook.revision = state.controller.selection_serial;

@@ -1,5 +1,6 @@
 //! Bounded feh-style command descriptions and shell-safe substitutions.
 const std = @import("std");
+const core = @import("core.zig");
 pub const Command = struct {
     bytes: [4096]u8 = undefined,
     len: usize = 0,
@@ -53,6 +54,17 @@ pub const Snapshot = struct {
     pid: i32 = 0,
     manifest: []const u8 = "",
     image_format: []const u8 = "unknown",
+
+    /// View coordinates use backing pixels, with positive Y downward.
+    pub fn withView(self: Snapshot, view: core.View, viewport: core.Size) Snapshot {
+        var result = self;
+        result.viewport_width = @intFromFloat(viewport.width);
+        result.viewport_height = @intFromFloat(viewport.height);
+        result.offset_x = (viewport.width - @as(f64, @floatFromInt(self.width)) * view.scale) / 2 + view.pan_x;
+        result.offset_y = (viewport.height - @as(f64, @floatFromInt(self.height)) * view.scale) / 2 + view.pan_y;
+        result.zoom = view.scale;
+        return result;
+    }
 };
 const Writer = struct {
     output: []u8,
@@ -114,6 +126,24 @@ pub fn format(output: []u8, template: []const u8, image: Snapshot) ![:0]const u8
     }
     output[writer.len] = 0;
     return output[0..writer.len :0];
+}
+test "hook coordinates report image position rather than center-relative pan" {
+    const source: Snapshot = .{ .path = "scan.tif", .width = 640, .height = 480, .index = 3, .count = 5 };
+    const cases = [_]struct { viewport: core.Size, view: core.View, expected: []const u8 }{
+        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{}, .expected = "1000,700|180,110|100.00" },
+        .{ .viewport = .{ .width = 320, .height = 240 }, .view = .{ .pan_x = -16, .pan_y = 32 }, .expected = "320,240|-176,-88|100.00" },
+        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{ .scale = 2, .pan_x = 17, .pan_y = -9 }, .expected = "1000,700|-123,-139|200.00" },
+    };
+    for (cases) |case| {
+        const snapshot = source.withView(case.view, case.viewport);
+        var output: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(case.expected, try format(&output, "%g|%o|%z", snapshot));
+        try std.testing.expectEqual(source.index, snapshot.index);
+        try std.testing.expectEqual(source.count, snapshot.count);
+    }
+    const odd = source.withView(.{}, .{ .width = 961, .height = 641 });
+    try std.testing.expectEqual(@as(f64, 160.5), odd.offset_x);
+    try std.testing.expectEqual(@as(f64, 80.5), odd.offset_y);
 }
 test "commands retain titles, semicolon behavior and shell tests" {
     var command: Command = .{};

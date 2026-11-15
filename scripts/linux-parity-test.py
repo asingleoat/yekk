@@ -294,6 +294,21 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
     result = check("action menu invokes actual size and dismisses without quitting", ["--zoom", "50", "--trace-events", "--test-keys", "m,Return,m,Escape", first], gui=True)
     assert float(views(result)[-1]["scale"]) == 1
     check("HDR input is rejected", ["--benchmark", root / "tests/fixtures/linear-hdr.hdr"], expected=1)
+    coordinates = folder / "hook-coordinates"
+    coordinate_command = "printf '%%s\\n' %g %w %h %z %o > " + shlex.quote(str(coordinates))
+    for name, image, zoom, keys, pan in [
+        ('centered', first, '100', 'Return', (0, 0)),
+        ('zoomed', first, '150', 'Return', (0, 0)),
+        ('panned', root / 'tests/fixtures/detail-wide.png', '2000', 'C-Right,C-Down,Return', (-64, -64)),
+    ]:
+        check('hook image coordinates ' + name, ['--geometry', '960x640', '--zoom', zoom,
+              '-A', coordinate_command, '--test-keys', keys, image], gui=True)
+        viewport, width, height, reported_zoom, origin = coordinates.read_text().splitlines()
+        vw, vh = map(int, viewport.split(','))
+        x, y = map(int, origin.split(','))
+        scale = float(reported_zoom) / 100
+        assert abs(x - ((vw - int(width) * scale) / 2 + pan[0])) <= 0.5, name
+        assert abs(y - ((vh - int(height) * scale) / 2 + pan[1])) <= 0.5, name
     hook_output = folder / "hook"
     hook = "printf '%%s' %F > " + shlex.quote(str(hook_output))
     result = check("successful hook advances", ["-A", hook, "--trace-events", "--test-keys", "Return", first, second], gui=True)

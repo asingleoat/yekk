@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     original.write_bytes(paths[1].read_bytes())
     paths[1].unlink()
     paths[1].symlink_to(original)
-    env.update(KEEP=str(work / 'keep'), DISCARD=str(work / 'discard'), LOG=str(work / 'actions.log'), MANIFEST=str(work / 'manifest'))
+    env.update(KEEP=str(work / 'keep'), DISCARD=str(work / 'discard'), LOG=str(work / 'actions.log'), MANIFEST=str(work / 'manifest'), HOOK_VIEW=str(work / 'hook-view'))
     def cli(*args, cwd=work):
         return subprocess.check_output([str(viewer), *map(str, args)], cwd=cwd, env=env, text=True, timeout=5)
     def gui(*args, cwd=work):
@@ -36,11 +36,17 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     assert cli('--sort=filename', '--version-sort', '--print-filelist', *plain).splitlines() == list(map(str, plain))
     info = cli('-l', paths[0]).splitlines()
     assert info[0].startswith('NUM\tFORMAT\tWIDTH') and info[1].split('\t')[1:4] == ['png', '3', '2'], info
-    output = gui('-xg960x640-0+0', '--hook-test', '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"", '--action1=[Keep]mv %F "$KEEP/"',
+    output = gui('-xg960x640-0+0', '--hook-test', '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
                  '--action2=;[Inspect]printf inspect >> "$LOG"', '--action3=exit 7', '--action4=sleep 0.2; test -f %F',
                  '--action5=sleep 0.2; mv %F "$DISCARD/"', '--action7=echo %f', '--action8=cat %L > "$MANIFEST"', *paths)
     assert 'HOOK_TEST_PASSED' in output, output
     assert (work / 'actions.log').read_text() == 'zero\ninspect'
+    viewport, width, height, zoom, origin = (work / 'hook-view').read_text().splitlines()
+    vw, vh = map(int, viewport.split(','))
+    x, y = map(int, origin.split(','))
+    scale = float(zoom) / 100
+    assert abs(x - (vw - int(width) * scale) / 2) <= 0.5
+    assert abs(y - (vh - int(height) * scale) / 2) <= 0.5
     assert not paths[0].exists() and (work / 'discard' / paths[0].name).is_file()
     assert not paths[1].exists() and (work / 'keep' / paths[1].name).is_file()
     assert (work / 'keep' / paths[1].name).is_symlink() and original.is_file()

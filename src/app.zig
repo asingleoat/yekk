@@ -1354,22 +1354,17 @@ fn runHook(number: usize) void {
     const image = s.current.?;
     const path = (entry(id) orelse return).path;
     const vp = viewport();
-    s.hook.snapshot = .{
+    s.hook.snapshot = (hooks.Snapshot{
         .path = path,
         .width = image.source_width,
         .height = image.source_height,
         .bytes = @intCast(@max(0, s.stamps[id].bytes)),
         .index = (position(id) orelse 0) + 1,
         .count = s.entries.len,
-        .viewport_width = @intFromFloat(vp.width),
-        .viewport_height = @intFromFloat(vp.height),
-        .offset_x = (vp.width - @as(f64, @floatFromInt(image.source_width)) * s.geometry.scale) / 2 + s.geometry.pan_x,
-        .offset_y = (vp.height - @as(f64, @floatFromInt(image.source_height)) * s.geometry.scale) / 2 - s.geometry.pan_y,
-        .zoom = s.geometry.scale,
         .rotation = s.cached[id].rotation,
         .playing = s.slideshow_running,
         .pid = c.getpid(),
-    };
+    }).withView(.{ .scale = s.geometry.scale, .pan_x = s.geometry.pan_x, .pan_y = -s.geometry.pan_y }, vp);
     s.hook.template = command.*;
     s.hook.manifest_count = 0;
     if (hooks.needsManifest(command.body())) {
