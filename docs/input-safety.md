@@ -15,8 +15,13 @@ These checks run in production builds, including ReleaseFast.
   profiles that name an external file. Linux decodes BMP pixels with SDL.
 - Decode PBM, PGM and PPM with shared Zig code. Validate numeric fields and sample
   values, preserve 16-bit samples, and reject incomplete pixel data.
+- Decode JPEG XL directly with libjxl on Linux. Check dimensions, integer sample
+  precision, profile size and output buffer size. Join native jobs before freeing
+  storage. Use the orientation stored with JPEG XL image data. Ignore a second
+  orientation tag in Exif metadata.
 - Disable libvips operations marked as untrusted. Portable Linux packages omit
-  ImageMagick. Other image formats use ImageIO or enabled libvips codecs.
+  ImageMagick and the libvips JPEG XL wrapper. Other image formats use ImageIO
+  or enabled libvips codecs.
 
 The PNM decoder stores binary input at the end of each worker's output region.
 It expands pixels forward after each source sample has been read. This uses one

@@ -8,6 +8,8 @@ const Metadata = t.Metadata;
 const tiff = @import("tiff_pixels");
 const build_options = @import("build_options");
 const Extent = @import("raster").Extent;
+const source_file = @import("source");
+const jxl = @import("jxl_pixels");
 var decode_workers: usize = 1;
 var busy_workers: std.atomic.Value(usize) = .init(0);
 var srgb16: [65536]f32 = undefined;
@@ -40,7 +42,15 @@ pub fn lastError() [*:0]const u8 {
     return c.vips_error_buffer();
 }
 pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
-    const candidate = @import("pnm").Plan.open(std.mem.span(path), null) catch return -1;
+    const file = source_file.open(std.mem.span(path), false) catch return -1;
+    defer file.close();
+    if (std.meta.activeTag(file.format) == .jxl) {
+        const header = jxl.probe(file) catch return -1;
+        result.* = .{ .width = header.extent.width, .height = header.extent.height, .bits = header.bits };
+        @memcpy(result.format[0..3], "jxl");
+        return 0;
+    }
+    const candidate = if (std.meta.activeTag(file.format) == .pnm) @import("pnm").Plan.open(std.mem.span(path), null) catch return -1 else null;
     if (candidate) |plan| {
         defer plan.deinit();
         result.* = .{ .width = plan.extent.width, .height = plan.extent.height, .bits = if (plan.maximum > 255) 16 else 8 };
@@ -48,7 +58,7 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
         @memcpy(result.format[0..format.len], format);
         return 0;
     }
-    const input = openImage(path, false) catch return -1;
+    const input = openImage(file, false) catch return -1;
     defer t.unref(input);
     const extent = Extent.init(input.*.Xsize, input.*.Ysize) catch return -1;
     if (input.*.BandFmt < c.VIPS_FORMAT_UCHAR or input.*.BandFmt >= c.VIPS_FORMAT_LAST) return -1;
@@ -64,7 +74,7 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
     return 0;
 }
 pub fn formats() void {
-    inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm" }) |suffix| _ = c.puts(suffix);
+    inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm", ".jxl" }) |suffix| _ = c.puts(suffix);
     // Report enabled image readers, rather than every installed native plugin.
     inline for (.{
         .{ "jpegload_source", .{ ".jpg", ".jpeg", ".jpe", ".jfif" } },
@@ -73,7 +83,6 @@ pub fn formats() void {
         .{ "gifload_source", .{".gif"} },
         .{ "webpload_source", .{".webp"} },
         .{ "heifload_source", .{ ".heic", ".heif", ".avif" } },
-        .{ "jxlload_source", .{".jxl"} },
     }) |entry| {
         if (c.vips_operation_new(entry[0])) |operation| {
             defer t.unref(operation);
@@ -238,10 +247,24 @@ pub fn releaseTemporary(bytes: u64) void {
     _ = reserved.fetchSub(bytes, .release);
 }
 pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]const u8, load_options: LoadOptions) !Loaded {
+    const file = try source_file.open(std.mem.span(path), false);
+    defer file.close();
+    return loadOpened(prefix_bytes, allocator, path, file, load_options);
+}
+/// The caller keeps this validated regular-file handle alive until return.
+pub fn loadOpened(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]const u8, file: source_file.Open, load_options: LoadOptions) !Loaded {
     const owner_offset = std.mem.alignForward(usize, prefix_bytes, 64);
-    if (try tiff.Plan.open(std.mem.span(path))) |opened| {
+    const kind = std.meta.activeTag(file.format);
+    if (kind == .jxl) {
+        const workers = try acquireWorkers(decode_workers, load_options);
+        defer _ = busy_workers.fetchSub(workers, .release);
+        const result = try jxl.load(file, allocator, .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .workers = workers, .cancel = load_options.cancel, .raw_retirement = !build_options.debug_allocator }, reserveTemporary, releaseTemporary);
+        return wrapJxl(result, allocator, owner_offset);
+    }
+    if (kind == .tiff) if (try tiff.Plan.open(std.mem.span(path))) |opened| {
         var plan = opened;
         defer plan.deinit();
+        if (!std.meta.eql(file.stamp, plan.stamp)) return error.SourceChanged;
         var supported = true;
         if (plan.profile.len > 0) {
             const profile = c.cmsOpenProfileFromMem(plan.profile.ptr, @intCast(plan.profile.len));
@@ -262,9 +285,10 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
             const decoded = try plan.decode(false, allocator, .{ .workers = workers, .simd_predictor = true, .raw_retirement = !build_options.debug_allocator, .prefix_bytes = owner_offset + @sizeOf(Owner), .row_alignment = 1, .cancel = load_options.cancel }, null);
             return wrapDecoded(decoded, allocator, owner_offset);
         }
-    }
-    if (try @import("pnm").Plan.open(std.mem.span(path), load_options.cancel)) |plan| {
+    };
+    if (kind == .pnm) if (try @import("pnm").Plan.open(std.mem.span(path), load_options.cancel)) |plan| {
         defer plan.deinit();
+        if (!std.meta.eql(file.stamp, plan.file.stamp)) return error.SourceChanged;
         if (plan.extent.width > std.math.maxInt(c_int) or plan.extent.height > std.math.maxInt(c_int)) return error.InvalidDimensions;
         const workers = try acquireWorkers(plan.workerCount(decode_workers), load_options);
         defer _ = busy_workers.fetchSub(workers, .release);
@@ -273,9 +297,9 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
         try reserveTemporary(bytes);
         defer releaseTemporary(bytes);
         return wrapDecoded(try plan.decode(allocator, options), allocator, owner_offset);
-    }
+    };
     var pixels: Image = .{};
-    try decodeImage(path, &pixels);
+    try decodeImage(file, &pixels);
     errdefer free(&pixels);
     const slab = try allocator.alignedAlloc(u8, .fromByteUnits(64), owner_offset + @sizeOf(Owner));
     const owner: *Owner = @ptrCast(@alignCast(slab[owner_offset..].ptr));
@@ -283,7 +307,22 @@ pub fn loadWithPrefix(prefix_bytes: usize, allocator: std.mem.Allocator, path: [
     c.g_object_set_data_full(@ptrCast(pixels.image), "yekk-owner", owner, Owner.destroy);
     return .{ .prefix = @ptrCast(slab.ptr), .pixels = pixels };
 }
+fn wrapJxl(result: jxl.Result, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
+    var owned = true;
+    errdefer if (owned) result.decoded.deinit();
+    const data = result.decoded.profile;
+    const profile = c.cmsOpenProfileFromMem(data.ptr, @intCast(data.len)) orelse return error.NativeImageFailed;
+    defer _ = c.cmsCloseProfile(profile);
+    const colour = c.cmsGetColorSpace(profile);
+    const gray = colour == c.cmsSigGrayData;
+    if (colour != c.cmsSigRgbData and !(result.gray_source and gray)) return error.NativeImageFailed;
+    owned = false;
+    return wrapDecodedWithAttributes(result.decoded, allocator, owner_offset, result.opaque_source, gray);
+}
 fn wrapDecoded(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
+    return wrapDecodedWithAttributes(decoded, allocator, owner_offset, true, false);
+}
+fn wrapDecodedWithAttributes(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize, opaque_source: bool, gray_profile: bool) !Loaded {
     var owned = true;
     errdefer if (owned) decoded.deinit();
     const resident = c.vips_image_new_from_memory(decoded.pixels.ptr, decoded.pixels.len, @intCast(decoded.width), @intCast(decoded.height), 4, if (decoded.bits_per_component == 16) c.VIPS_FORMAT_USHORT else c.VIPS_FORMAT_UCHAR) orelse return error.OutOfMemory;
@@ -296,9 +335,10 @@ fn wrapDecoded(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset
     if (decoded.profile.len > 0) {
         c.vips_image_set_blob_copy(resident, c.VIPS_META_ICC_NAME, decoded.profile.ptr, decoded.profile.len);
         c.vips_image_set_int(resident, "yekk-native-profile", 1);
+        c.vips_image_set_int(resident, "yekk-gray-profile", @intFromBool(gray_profile));
     }
     _ = decoded.reclaimScratch();
-    return .{ .prefix = @ptrCast(decoded.slab.ptr), .pixels = .{ .image = resident, .width = decoded.width, .height = decoded.height, .bits = decoded.bits_per_component, .bytes = decoded.pixels.len, .opaque_source = true } };
+    return .{ .prefix = @ptrCast(decoded.slab.ptr), .pixels = .{ .image = resident, .width = decoded.width, .height = decoded.height, .bits = decoded.bits_per_component, .bytes = decoded.pixels.len, .opaque_source = opaque_source } };
 }
 pub fn decode(path: [*:0]const u8, result: *Image) c_int {
     result.* = .{};
@@ -308,9 +348,7 @@ pub fn decode(path: [*:0]const u8, result: *Image) c_int {
 }
 /// File names are literal paths, never libvips option strings. Pin the regular
 /// file before handing it to a native loader; do not reopen a raced path.
-fn openImage(path: [*:0]const u8, memory: bool) Error!*c.VipsImage {
-    const opened = @import("source").open(std.mem.span(path), false) catch return error.NativeImageFailed;
-    defer opened.close();
+fn openImage(opened: source_file.Open, memory: bool) Error!*c.VipsImage {
     if (opened.bmp()) |header| {
         const bytes = std.math.add(usize, header.extent.bytes(4, 2) catch return error.NativeImageFailed, if (header.profile) |profile| profile.length else 0) catch return error.NativeImageFailed;
         if (memory) try reserveTemporary(bytes);
@@ -322,9 +360,9 @@ fn openImage(path: [*:0]const u8, memory: bool) Error!*c.VipsImage {
     defer t.unref(source);
     return c.vips_image_new_from_source(source, "", "access", @as(c_int, c.VIPS_ACCESS_RANDOM), "memory", @as(c_int, @intFromBool(memory)), "fail_on", @as(c_int, c.VIPS_FAIL_ON_WARNING), @as(?*anyopaque, null)) orelse error.NativeImageFailed;
 }
-fn decodeImage(path: [*:0]const u8, result: *Image) Error!void {
+fn decodeImage(file: source_file.Open, result: *Image) Error!void {
     c.vips_error_clear();
-    const input = try openImage(path, true);
+    const input = try openImage(file, true);
     defer t.unref(input);
     // Explicitly reject floating/HDR source formats, including TIFF variants.
     if (input.*.Bands <= 0 or (input.*.BandFmt != c.VIPS_FORMAT_UCHAR and input.*.BandFmt != c.VIPS_FORMAT_USHORT) or input.*.Coding != c.VIPS_CODING_NONE) return error.UnsupportedSampleFormat;

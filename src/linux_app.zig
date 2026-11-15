@@ -382,7 +382,7 @@ fn decodeScheduled(path: [:0]const u8, allocator: std.mem.Allocator, load_option
     const link_stamp = Stamp.readLink(path) orelse return error.UnreadableImage;
     const opened = try @import("source").open(path, true);
     defer opened.close();
-    const loaded = native.image.loadWithPrefix(@sizeOf(Image), allocator, path.ptr, load_options) catch |err| return switch (err) {
+    const loaded = native.image.loadOpened(@sizeOf(Image), allocator, path.ptr, opened, load_options) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Cancelled => error.Cancelled,
         else => error.DecodeFailed,
@@ -2026,11 +2026,13 @@ test "Linux JPEG variants and grayscale preserve dimensions and precision" {
 test "untrusted native loaders remain blocked behind the shared PNM reader" {
     try initTestDecoder();
     const c = native.types.c;
-    if (c.vips_image_new_from_file("tests/fixtures/pnm-p6-8.ppm", @as(?*anyopaque, null))) |image| {
-        c.g_object_unref(image);
-        return error.UntrustedReaderEnabled;
+    inline for (.{ "tests/fixtures/pnm-p6-8.ppm", "tests/fixtures/jxl-rgb8.jxl" }) |path| {
+        if (c.vips_image_new_from_file(path, @as(?*anyopaque, null))) |image| {
+            c.g_object_unref(image);
+            return error.UntrustedReaderEnabled;
+        }
+        c.vips_error_clear();
     }
-    c.vips_error_clear();
 }
 
 test "SDL BMP decoding preserves palette, RLE, orientation and 565 pixels" {
@@ -2556,4 +2558,45 @@ test "HDR and floating source variants are rejected" {
     try initTestDecoder();
     try std.testing.expectError(error.DecodeFailed, decodeWithAllocator("tests/fixtures/linear-hdr.hdr", std.testing.allocator));
     try std.testing.expectError(error.DecodeFailed, decodeWithAllocator("tests/fixtures/linear-gray.pfm", std.testing.allocator));
+}
+
+test "direct JPEG XL preserves precision, alpha, orientation and one owned slab" {
+    try initTestDecoder();
+    inline for (.{ .{ "rgb8", "pnm-p6-8.ppm" }, .{ "rgb8-raw", "pnm-p6-8.ppm" }, .{ "rgb16", "pnm-p6-16.ppm" }, .{ "gray16", "pnm-p5-16.pgm" }, .{ "alpha", "alpha.content" }, .{ "orientation6", "jxl-orientation6-reference.ppm" } }) |sample| {
+        const path = "tests/fixtures/jxl-" ++ sample[0] ++ ".jxl";
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decodeWithAllocator(path, allocator.allocator());
+        var owned = true;
+        defer if (owned) image.destroy();
+        const expected = try decodeWithAllocator("tests/fixtures/" ++ sample[1], std.testing.allocator);
+        defer expected.destroy();
+        try std.testing.expectEqual(expected.pixels.width, image.pixels.width);
+        try std.testing.expectEqual(expected.pixels.height, image.pixels.height);
+        try std.testing.expectEqual(expected.pixels.bits, image.pixels.bits);
+        var metadata: native.Metadata = .{};
+        try std.testing.expectEqual(@as(c_int, 0), native.image.probe(path, &metadata));
+        try std.testing.expectEqual(image.pixels.width, metadata.width);
+        try std.testing.expectEqual(image.pixels.height, metadata.height);
+        try std.testing.expectEqual(image.pixels.bits, metadata.bits);
+        var actual: [4]u16 = undefined;
+        var reference: [4]u16 = undefined;
+        for (0..image.pixels.height) |y| for (0..image.pixels.width) |x| {
+            try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&image.pixels, @intCast(x), @intCast(y), &actual));
+            try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&expected.pixels, @intCast(x), @intCast(y), &reference));
+            try std.testing.expectEqualSlices(u16, &reference, &actual);
+        };
+        {
+            var frame: native.Frame = .{};
+            defer native.render.free(&frame);
+            try std.testing.expectEqual(@as(c_int, 0), native.render.render(&image.pixels, 8, 8, 1, 0, 0, 1, 0, &frame));
+        }
+        image.destroy();
+        owned = false;
+        try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+        try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    }
+    var failure = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, decodeWithAllocator("tests/fixtures/jxl-rgb8.jxl", failure.allocator()));
+    var cancel: std.atomic.Value(bool) = .init(true);
+    try std.testing.expectError(error.Cancelled, decodeScheduled("tests/fixtures/jxl-rgb8.jxl", std.testing.allocator, .{ .cancel = &cancel }));
 }

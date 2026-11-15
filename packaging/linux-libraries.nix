@@ -45,7 +45,7 @@ let
     cfitsio = null; fftw = null; libarchive = null; libraw = null;
     librsvg = null; libultrahdr = null; matio = null; openexr = null;
     openjpeg = null; openslide = null; poppler = null;
-    imagemagick = null;
+    imagemagick = null; libjxl = null;
   }).overrideAttrs (old: {
     buildInputs = old.buildInputs ++ privateMetadata;
     mesonFlags = old.mesonFlags ++ [
@@ -55,7 +55,7 @@ let
       # sample-format rejection, rather than Magick silently normalizing it.
       "-Dauto_features=disabled"
     ] ++ map (name: "-D${name}=enabled") [
-      "cgif" "exif" "fontconfig" "heif" "imagequant" "jpeg" "jpeg-xl"
+      "cgif" "exif" "fontconfig" "heif" "imagequant" "jpeg"
       "lcms" "highway" "pangocairo" "png" "tiff" "webp" "zlib"
     ];
     postFixup = "";

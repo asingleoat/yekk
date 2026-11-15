@@ -63,7 +63,7 @@
               ];
             };
             nativeBuildInputs = [ (zigFor system) ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.pkg-config pkgs.makeWrapper pkgs.desktop-file-utils ];
-            buildInputs = [ pkgs.libtiff ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
+            buildInputs = [ pkgs.libtiff ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
             YEKK_TIFF_LIB = "${pkgs.lib.getLib pkgs.libtiff}/lib";
             YEKK_TIFF_INCLUDE = "${pkgs.lib.getDev pkgs.libtiff}/include";
             SDKROOT = if pkgs.stdenv.hostPlatform.isDarwin then "${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" else "";
@@ -156,7 +156,7 @@
       devShells = eachSystem (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {
-            packages = [ (zigFor system) pkgs.libtiff pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
+            packages = [ (zigFor system) pkgs.libtiff pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
             YEKK_TEST_PORTAL = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal}" else "";
             YEKK_TEST_PORTAL_GTK = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal-gtk}" else "";
             YEKK_LINUX_LOADER = if pkgs.stdenv.hostPlatform.isLinux then pkgs.stdenv.cc.bintools.dynamicLinker else "";

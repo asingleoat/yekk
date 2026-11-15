@@ -31,7 +31,7 @@ pub fn exists(path: []const u8) bool {
     return files.stat(terminated.ptr, &stat) == 0 or (runtime.errno().* != c.ENOENT and runtime.errno().* != c.ENOTDIR);
 }
 
-pub const Format = union(enum) { other, tiff, pnm, bmp: @import("bmp").Header };
+pub const Format = union(enum) { other, tiff, pnm, jxl, bmp: @import("bmp").Header };
 pub const Open = struct {
     format: Format = .other,
     fd: c_int,
@@ -77,6 +77,7 @@ pub fn open(path: [:0]const u8, completeness: bool) Error!Open {
     }
     var format: Format = .other;
     if (count >= 4 and (std.mem.eql(u8, signature[0..4], "II\x2a\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2a") or std.mem.eql(u8, signature[0..4], "II\x2b\x00") or std.mem.eql(u8, signature[0..4], "MM\x00\x2b"))) format = .tiff;
+    if ((signature[0] == 0xff and signature[1] == 0x0a) or (count == 8 and std.mem.eql(u8, &signature, "\x00\x00\x00\x0cJXL "))) format = .jxl;
     if (signature[0] == 'P' and signature[1] >= '1' and signature[1] <= '6') format = .pnm;
     if (signature[0] == 'B' and signature[1] == 'M') {
         var header: [138]u8 = undefined;

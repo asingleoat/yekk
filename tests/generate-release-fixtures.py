@@ -8,7 +8,12 @@ import zlib
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--cjpeg', type=Path, help='optional libjpeg cjpeg to regenerate progressive JPEG')
+p.add_argument('--vips', type=Path, help='optional pinned vips to regenerate JPEG XL fixtures')
+p.add_argument('--cjxl', type=Path, help='optional pinned JPEG XL encoder for the orientation fixture')
+p.add_argument('--djxl', type=Path, help='optional pinned JPEG XL decoder for reference pixels')
 a = p.parse_args()
+if bool(a.cjxl) != bool(a.djxl):
+    p.error('--cjxl and --djxl must be supplied together')
 fixtures = Path(__file__).resolve().parent / 'fixtures'
 jpeg = (fixtures / 'orientation6.jpg').read_bytes()
 for cut in (4, 64):
@@ -90,3 +95,33 @@ for magic, bits, values, maximum in [
 (fixtures / 'pnm-invalid-sample.ppm').write_bytes(b'P3\n1 1\n255\n0 256 0\n')
 (fixtures / 'pnm-invalid-range.pgm').write_bytes(b'P5\n1 1\n65536\n\0\0')
 (fixtures / 'pnm-invalid-number.ppm').write_bytes(b'P6\n42949672960 1\n255\n')
+
+if a.vips:
+    for kind, source in [('rgb8', 'pnm-p6-8.ppm'), ('rgb16', 'pnm-p6-16.ppm'), ('gray16', 'pnm-p5-16.pgm'), ('alpha', 'alpha.content')]:
+        subprocess.run([str(a.vips), 'jxlsave', str(fixtures / source), str(fixtures / f'jxl-{kind}.jxl'), '--lossless'], check=True)
+    # Extract the same RGB8 codestream without its container boxes.
+    container = (fixtures / 'jxl-rgb8.jxl').read_bytes()
+    at = 0
+    parts = []
+    while at < len(container):
+        size = struct.unpack_from('>I', container, at)[0]
+        if size < 8 or size > len(container) - at:
+            raise ValueError('invalid encoder container box')
+        kind = container[at + 4:at + 8]
+        if kind == b'jxlc':
+            parts = [container[at + 8:at + size]]
+            break
+        if kind == b'jxlp':
+            index = struct.unpack_from('>I', container, at + 8)[0]
+            if index & 0x7fffffff != len(parts):
+                raise ValueError('unexpected encoder codestream part index')
+            parts.append(container[at + 12:at + size])
+        at += size
+    if not parts:
+        raise ValueError('encoder did not produce a codestream box')
+    (fixtures / 'jxl-rgb8-raw.jxl').write_bytes(b''.join(parts))
+
+if a.cjxl:
+    output = fixtures / 'jxl-orientation6.jxl'
+    subprocess.run([str(a.cjxl), str(fixtures / 'orientation6.jpg'), str(output)], check=True)
+    subprocess.run([str(a.djxl), str(output), str(fixtures / 'jxl-orientation6-reference.ppm')], check=True)

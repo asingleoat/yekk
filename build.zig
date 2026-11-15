@@ -217,7 +217,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     root.addImport("geometry", geometry);
     const color = b.createModule(.{ .root_source_file = b.path("src/color.zig"), .target = target, .optimize = optimize });
     const bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/linux-bindings.h"), .target = target, .optimize = optimize });
-    const include_flags = b.run(&.{ "pkg-config", "--cflags-only-I", "vips", "sdl3", "lcms2", "x11", "xi", "xext", "xfixes" });
+    const include_flags = b.run(&.{ "pkg-config", "--cflags-only-I", "vips", "sdl3", "lcms2", "x11", "xi", "xext", "xfixes", "libjxl", "libjxl_threads" });
     var includes = std.mem.tokenizeAny(u8, include_flags, " \t\r\n");
     while (includes.next()) |flag| {
         if (!std.mem.startsWith(u8, flag, "-I")) return error.UnexpectedPkgConfigFlag;
@@ -226,6 +226,12 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     runtime_options.addOption(?[:0]const u8, "font_file", if (b.graph.environ_map.get("YEKK_FONT_FILE")) |path| try b.allocator.dupeSentinel(u8, path, 0) else null);
     const native = b.createModule(.{ .root_source_file = b.path("src/platform/linux.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const bindings_module = bindings.createModule();
+    const jxl = b.createModule(.{ .root_source_file = b.path("src/jxl_pixels.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    jxl.addImport("jxl_bindings", bindings_module);
+    jxl.addImport("source", source);
+    jxl.addImport("raster", raster);
+    jxl.addImport("pixel_storage", tiff.import_table.get("pixel_storage").?);
+    native.addImport("jxl_pixels", jxl);
     native.addImport("linux_bindings", bindings_module);
     native.addImport("geometry", geometry);
     native.addImport("color", color);
@@ -318,9 +324,9 @@ fn linkLinux(b: *std.Build, module: *std.Build.Module, portable: bool) !void {
     // SDL's .pc includes linker switches Zig's pkg-config parser cannot yet
     // consume. Query the structured flag subsets and explicitly retain rpaths.
     const flags = b.run(if (portable)
-        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libtiff-4" }
+        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libtiff-4", "libjxl", "libjxl_threads" }
     else
-        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11" });
+        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libjxl", "libjxl_threads" });
     try linkLinuxLibraries(b, module, portable, flags);
 }
 

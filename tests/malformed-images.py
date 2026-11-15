@@ -85,6 +85,11 @@ with tempfile.TemporaryDirectory(prefix='yekk-invalid-images-') as temporary:
         add(name, (fixtures / name).read_bytes(), 1)
     for index, header in enumerate([b'P6\n0 1\n255\n', b'P6\n1 0\n255\n', b'P6\n4294967295 4294967295\n65535\n', b'P3\n1 1\n0\n0 0 0', b'P2\n1 1\n255\n-1', b'P1\n1 1\n2']):
         add(f'header-{index}.pnm', header, 1)
+    if sys.platform.startswith('linux'):
+        jxl = (fixtures / 'jxl-rgb8-raw.jxl').read_bytes()
+        add('valid.jxl', jxl, 0)
+        for length in sorted({0, 1, 2, 8, len(jxl) // 2}):
+            add(f'truncated-{length}.jxl', jxl[:length], 1)
     pipe = folder / 'named-pipe.png'
     os.mkfifo(pipe)
     corpus.append((pipe, 1))
