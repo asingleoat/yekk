@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--package', type=Path, required=True)
@@ -39,4 +40,11 @@ with tempfile.TemporaryDirectory(prefix='yekk mounted release ') as temporary:
         print(result.stdout, result.stderr)
         assert result.returncode == 0, report
     finally:
-        subprocess.run(['hdiutil', 'detach', str(mount)], check=True, capture_output=True, text=True)
+        for attempt in range(5):
+            try:
+                subprocess.run(['hdiutil', 'detach', str(mount)], check=True, capture_output=True, text=True)
+                break
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 16 or attempt == 4:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
