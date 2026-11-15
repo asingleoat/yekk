@@ -1,19 +1,30 @@
 # Release packaging
 
-Complete local builds and tests before hosted builds. GitHub workflows are
-disabled. Enabling them and publishing releases require manual approval.
+A release contains tested binaries, matching source archives and checksums.
+Complete local builds and tests before using hosted builds.
+GitHub workflows are disabled. Enabling them and publishing releases require
+manual approval.
+
+## Targets and test coverage
+
+Build a separate package for each operating system and CPU architecture.
+Record which runtime tests were performed on each package.
 
 | Target | Package | Runtime checks |
 | --- | --- | --- |
-| macOS 14+, ARM64 | DMG | Native ARM64 |
-| macOS 14+, x86_64 | DMG | Record native Intel or Rosetta coverage |
-| Linux x86_64 | tar.gz | Desktop, relocation and isolation |
-| Linux aarch64 | tar.gz | Best effort; runtime unverified |
+| macOS 14+, ARM64 | DMG disk image | Run on Apple Silicon. |
+| macOS 14+, x86_64 | DMG disk image | Record whether execution used Intel hardware or Rosetta. |
+| Linux x86_64 | Compressed tar archive | Test viewing, relocation and filesystem isolation. |
+| Linux ARM64 (aarch64) | Compressed tar archive | Best effort; runtime unverified until tested on ARM hardware. |
 
-An aarch64 asset must build successfully. Label its unverified runtime status.
-ARM hardware tests do not block the release.
+Rosetta runs Intel programs on Apple Silicon. Its results do not establish
+native Intel hardware coverage. An aarch64 package must build successfully.
+Label its runtime-unverified status. ARM hardware tests do not block the release.
 
 ## macOS
+
+A DMG is a disk image containing `Yekk.app` and license information.
+Mounting it makes those files available as a volume.
 
 ```sh
 nix develop path:. -c zig build test dmg -Doptimize=ReleaseSafe -Dcpu=baseline
@@ -21,14 +32,18 @@ nix develop path:. -c python3 scripts/macos-release-test.py \
   --package dist --output dist/macos-release-validation.json
 ```
 
-Give `--package` one DMG path or a directory containing one DMG.
-Packaging records checksums and library versions. It checks library paths and
-tests the relocated app without Nix library paths. The release test mounts the DMG read-only,
-tests its viewer and detaches it.
+`-Dcpu=baseline` selects the application's baseline CPU instruction set.
+Run the mounted-image check once per DMG. `--package` accepts one DMG path or
+a directory containing one DMG.
 
-Packages use local ad-hoc signatures. These have no publisher identity.
-There is no Developer ID signature or notarization. Downloaded apps may require
-Gatekeeper approval on first launch.
+Packaging records checksums and library versions. It checks the paths used to
+find shared libraries and tests the app from a different directory without Nix
+library paths. The release test mounts the DMG read-only, tests its viewer and
+detaches the volume afterward.
+
+Packages use local ad-hoc code signatures without a signing certificate.
+They have no Apple Developer ID signature or notarization.
+Downloaded apps may require macOS first-launch approval.
 Intel macOS uses a separate locked Nixpkgs Darwin branch with the same Zig master.
 
 ## Linux
@@ -39,35 +54,46 @@ nix develop path:. -c python3 scripts/linux-release-test.py \
   --package result-release --isolate --output dist/linux-release-validation.json
 ```
 
-`--isolate` requires an ordinary Linux distribution with `/usr/bin/python3` and
-`/usr/bin/bwrap`. It makes `/nix` unavailable and tests the archive from a different directory.
-On NixOS, run under `steam-run` without `--isolate`.
+The test extracts the archive into a different directory before launching it.
+This checks that it does not depend on its original installation path.
 
-If namespace setup needs privileges, add `--isolate-sudo` to `--isolate`.
-The test setup uses sudo, then runs tests as the calling user. `--minimal-root PATH_TO_STATIC_BUSYBOX` provides a
-separate decoder-only check without Nix or host libraries.
+`--isolate` requires an ordinary Linux distribution with `/usr/bin/python3` and
+`/usr/bin/bwrap`. Bubblewrap gives the test a separate filesystem view with
+`/nix` hidden. On NixOS, run under `steam-run` without `--isolate`.
+
+If filesystem-namespace setup needs privileges, add `--isolate-sudo`.
+Setup uses sudo, then runs tests as the calling user.
+`--minimal-root PATH_TO_STATIC_BUSYBOX` instead creates a minimal filesystem
+without Nix or host libraries. This tests decoding only, not desktop presentation.
+The argument must name a statically linked BusyBox executable.
 
 Extract `yekk-VERSION-linux-ARCH.tar.gz`. Run `./yekk`, or `steam-run ./yekk`
-on NixOS. Keep `lib`, `libexec` and `share` together.
+on NixOS. Keep `lib`, `libexec` and `share` beside the launcher.
+`VERSION` is the release version; `ARCH` is `x86_64` or `aarch64`.
 
-Core SDL, libvips, libtiff and LittleCMS libraries link statically. The archive
-includes remaining shared libraries and the matching glibc loader.
-It needs host graphics drivers and desktop services, but no Nix installation.
-It is a directory distribution, not a single static executable.
+Static linking places library code inside the executable. The Linux executable
+contains the core SDL, libvips, libtiff and LittleCMS libraries.
+Other shared libraries remain separate files in the archive.
+The bundled glibc loader starts the executable with these matching libraries.
+Host graphics drivers and desktop services are still required.
+This is a directory distribution, not a single static executable.
 
 ## Release contents
 
 Include these files:
 
-- Platform binaries and SHA-256 files.
+- Platform binaries and SHA-256 checksum files.
 - `LICENSE`, dependency notices and `THIRD-PARTY.json`.
-- Companion library-source archives with pinned sources, vendor inputs and build recipes.
-- The project source archive and exact commit identity.
+- Companion archives containing dependency sources, build instructions and patches.
+- The project source archive and the Git commit used to produce it.
 - Runtime-unverified labels for best-effort targets.
 
-Generate the project archive from the release commit. Keep dependency sources
-and Nixpkgs recipes with the release. Do not reuse an older source archive.
+A SHA-256 checksum lets users check that a downloaded file matches the release.
+`THIRD-PARTY.json` records bundled dependency versions and licenses.
+Keep pinned dependency sources and Nixpkgs build recipes with the release.
+Generate the project archive from the release commit, not an older candidate.
 
 Run the [validation checks](validation.md) on mounted or extracted packages.
-Record architecture, OS, display backend, hashes and untested cases under `dist/`.
-Test viewing on the intended desktop. Publish after manual review.
+Store architecture, OS, display backend, file hashes and untested cases under `dist/`.
+Test viewing on the intended desktop. Tag the tested commit and publish after
+manual review.

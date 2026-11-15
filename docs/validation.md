@@ -1,7 +1,7 @@
 # Testing and measurement
 
-Store local reports, captures and profiles under ignored `dist/` paths.
 Run commands from the repository root inside the Nix development shell.
+Store local reports, captures and profiles under ignored `dist/` paths.
 
 ## Core checks
 
@@ -12,14 +12,18 @@ zig build -Doptimize=ReleaseSafe
 sh scripts/catalog-test.sh
 ```
 
-Fixtures cover parsing, navigation, cache policy, hooks, file lists and decoding.
-TIFF checks include both byte orders, all orientations, strips, tiles and clipped
-edges. Compare complete samples and row padding across workers and predictors.
-Check malformed input, allocation failure and retained native references.
+A **test fixture** is a file with known pixels or deliberately invalid structure.
+Fixtures cover parsing, navigation, cache policy, commands, image lists and decoding.
+TIFF checks include both byte orders, all orientations, strips, tiles and clipped edges.
+Compare complete samples and row padding across worker counts and predictors.
 
-Use `-Ddebug-allocator=true` for lifetime checks. Check balanced owned allocations
-and zero live owned bytes at exit. Native library allocations need separate tools.
-Exercise cancellation, partial failure, pending frames and full release queues.
+Use `-Ddebug-allocator=true` for allocation and lifetime checks.
+Require equal owned allocation/free counts and `live_bytes=0` when the process exits.
+Native libraries allocate outside these counters.
+
+Test malformed input and allocation failure. Close windows while work is pending.
+Check that native image references remain readable for their required lifetime.
+Exercise full cleanup queues, where the UI must defer release without losing ownership.
 
 ## macOS
 
@@ -32,8 +36,9 @@ zig build -Doptimize=ReleaseSafe -Ddebug-allocator=true --prefix zig-out-debug
 python3 scripts/stability.py --output dist/stability.json
 ```
 
-GPU fixtures check color, alpha, scaling and surface ownership.
-Integration tests cover navigation, windows, hooks, file lists and source changes.
+GPU fixtures check color, alpha, scaling and display-surface ownership.
+Integration tests exercise the application through its input and worker paths.
+They cover navigation, windows, commands, image lists and source changes.
 Stability tests inject failures and vary prefetch availability.
 Tests that write source files use temporary copies.
 
@@ -51,28 +56,41 @@ python3 scripts/wayland-validation.py --parity --scale 2 --output dist/wayland-s
 python3 scripts/linux-memory-test.py
 ```
 
+Here, **parity** means matching macOS behavior for shared options and actions,
+not matching its execution times.
+
 | Script | Purpose |
 | --- | --- |
-| `linux-validation.py` | Decode, allocation, rendering and warm-cache checks |
-| `linux-parity-test.py` | CLI, settings, hooks and shared viewing behavior |
-| `linux-desktop-test.py` | Real desktop input, dialogs, drops and monitor profiles |
-| `wayland-validation.py` | Run validation or parity tests in private Weston |
-| `linux-memory-test.py` | Test oversized-image rejection inside a cgroup limit |
+| `linux-validation.py` | Decode, allocation, rendering and cached-navigation checks. |
+| `linux-parity-test.py` | Command line, settings, shell commands and shared viewing behavior. |
+| `linux-desktop-test.py` | Desktop input, dialogs, file drops and monitor profiles. |
+| `wayland-validation.py` | Run validation or parity tests in a separate Weston compositor. |
+| `linux-memory-test.py` | Check oversized-image rejection inside a cgroup memory limit. |
 
-Desktop tests use private Xvfb/D-Bus or Weston sessions. Portal tests accept
-`--dialog-driver portal`. The memory test requires a systemd user manager.
-It does not fill host RAM. Zig fixtures and `private_bus.py` support these tests.
+Xvfb supplies an X11 display without a physical screen. Weston supplies a Wayland
+compositor. Tests create separate displays and D-Bus service connections.
+Their keyboard and pointer events do not target the user's desktop.
+`--scale 2` tests two backing pixels per logical window unit on each axis.
 
-GUI tests use `supervise.py` for deadlines and process-group cleanup.
-`supervisor-test.py` checks its Linux fork/exec guard.
-Inject keyboard and pointer input only into private displays.
+Portal tests accept `--dialog-driver portal` and start private file-dialog services.
+The memory test requires a systemd user manager. It limits its own cgroup, a Linux
+resource-control group, rather than filling host RAM.
+Zig fixtures and `private_bus.py` support these tests.
+
+GUI tests use `supervise.py` for deadlines, child-process cleanup and recursive
+viewer detection. `supervisor-test.py` checks that ordinary launch helpers are
+accepted and a newly executed viewer copy is rejected.
 Test physical monitors, hardware compositors and GPU drivers separately.
 
 ## Benchmarking and profiling
 
-Finish builds before timing. Keep source images read-only.
-Record binary/source hashes, toolchain, architecture, image layout, backing size,
-scale and worker count. Run profilers and capture diagnostics separately.
+A benchmark measures elapsed time for specified work. A profiler records where
+time or allocations occur. Run them separately so profiling overhead does not
+change the timing comparison. Finish builds first and keep source images read-only.
+
+Record the binary/source hashes, compiler, architecture, image layout, viewport
+size, display scale and worker count. A backing pixel is one pixel in the window's
+drawing buffer; it can differ from a logical window-coordinate unit.
 
 ### Decode measurements
 
@@ -84,38 +102,59 @@ zig build build-bench-image -Doptimize=ReleaseSafe
 python3 scripts/bench-image.py /path/to/scan.tif --workers 4 --output dist/decode.jsonl
 ```
 
-The executable reports stage times, memory and decoded checksums.
+The executable reports stage times, memory and a decoded-pixel checksum.
 `bench-image.py` repeats reads and decodes with file-cache controls.
-For another worker count, change `--workers`. Use `--native-predictor` to measure
-the library predictor. Check exact native/SIMD output with:
+Change `--workers` to compare CPU worker counts.
+Use `--native-predictor` to measure libtiff's horizontal predictor instead of Zig's.
+The `verify` mode checks their complete output bytes:
 
 ```sh
 ./zig-out/bin/yekk-bench-image verify tests/fixtures/predictor16-little-tiled.tif --workers 4
 ```
 
-Linux supplies its own `build-bench-image` backend. Headless modes measure
-preparation. Supervised viewer tests also include UI publication:
+Linux supplies its own `build-bench-image` backend.
+Headless modes create no visible window and measure preparation work.
+Supervised viewer benchmarks also submit results to the window system:
 
 ```sh
 python3 scripts/supervise.py ./zig-out/bin/yekk --benchmark-pan --fit actual /path/to/scan.tif
 ```
 
-Use `compare-viewport.py` to compare saved PNG images.
-Separate filesystem-warm, decoded-cache and prepared-view results.
-Priming reads, fresh APFS clones and uncached flags do not prove cold storage.
+Use `compare-viewport.py` to compare saved PNG pixels.
+Keep these cache states separate in timing results:
+
+| State | Work reused |
+| --- | --- |
+| Filesystem-warm | The OS already has file data, but Yekk still decodes it. |
+| Decoded-image hit | Yekk reuses source pixels, but a new view can need rendering. |
+| Prepared-view hit | Yekk reuses viewport pixels; final display work remains. |
+
+A priming read reads the file before timing to populate the OS file cache.
+An APFS clone is a new file that shares stored data blocks with the original.
+Neither this nor uncached-read flags prove that storage-device caches are cold.
 Record actual read bytes. Do not flush host caches.
 
 ### Comparing builds
 
-Use minimum times to estimate throughput without host noise. Report frame tail
-latency separately. Set warmup and sample counts before testing.
-An ABBA block runs the control, candidate, candidate and control in that order.
-A BAAB block reverses the order. Randomized blocks reduce time-order bias.
-Include an identical-binary control to check the method.
+The **control** is the reference binary; the **candidate** contains the change.
+Set warmup and sample counts before testing. Use minimum times to estimate
+throughput without host noise. Report slow requests separately and name the timed stage.
 
-`bench-compare.py` collects trials. `bench-analyze.py` compares the paired minimums
-and calculates uncertainty. Keep slow samples and complete the planned trials.
-Check order effects and clock resolution before interpreting a small difference.
+An ABBA group runs control, candidate, candidate and control.
+A BAAB group reverses that order. Randomized groups reduce time-order bias.
+Include an identical-binary comparison to check the method.
+Set both `control` and `candidate` to the same executable path for this check.
+
+`bench-compare.py` collects trials. `bench-analyze.py` selects the faster control
+and candidate result within each group, then compares these paired minimums.
+For example, A=10, B=12, B=11, A=14 ms contributes A=10 and B=11 ms.
+The candidate/control ratio for this group is 1.1.
+
+The analyzer combines groups and reports uncertainty and order checks.
+A ratio below 1 favors the candidate. It can still classify the result as
+inconclusive when those checks fail. Keep slow samples and complete the planned trials.
+Clock resolution is the smallest time difference the timer can distinguish.
+Results below it cannot support a precise speed comparison.
 
 Save a comparison plan as `dist/plan.json`:
 
@@ -133,13 +172,18 @@ Save a comparison plan as `dist/plan.json`:
 }
 ```
 
+`width` and `height` specify backing pixels. `mode` selects the benchmark workload.
+The `steady` metric uses median preparation time after four warmup frames per process.
+The analyzer then takes the faster process result for each variant within a group.
+
 ```sh
 python3 scripts/bench-compare.py --plan dist/plan.json --blocks 24 --output dist/comparison.json
 python3 scripts/bench-analyze.py dist/comparison.json --output dist/analysis.json
 ```
 
-Count decodes, prepared hits and allocations alongside time.
+Count decodes, prepared-view hits and allocations alongside time.
 Confirm navigation targets are cached before asserting zero redecodes.
-Measure decode, conversion, preparation, upload and commit separately.
-A native display submission does not identify a visible frame.
-A heartbeat does not measure hardware input latency. See [package checks](release.md).
+Measure decode, conversion, preparation, upload and display submission separately.
+Submission records when Yekk hands pixels to the window system, not when they become visible.
+A heartbeat measures UI timer callbacks, not hardware input latency.
+See [package checks](release.md).

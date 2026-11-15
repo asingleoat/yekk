@@ -10,7 +10,7 @@ Download macOS and Linux binaries from [Releases](https://github.com/asingleoat/
 
 ## Build and run
 
-[Nix](https://nixos.org/) supplies the pinned Zig master and dependencies.
+[Nix](https://nixos.org/) supplies Zig master and dependencies at the versions recorded in `flake.lock`.
 
 ```sh
 nix develop path:.
