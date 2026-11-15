@@ -1,9 +1,10 @@
 # Yekk
 
-Yekk is an image viewer for macOS and Linux, written in Zig. It supports directories,
-full-resolution zoom, slideshows and shell command hooks.
+I paid for the whole machine and I'm going to use the whole machine.
 
-It requires macOS 14+ or Linux with X11 or Wayland.
+Yekk is an image viewer for macOS and Linux, written in Zig. It aggressively caches decoded image data to make interactive use as snappy as possible. It will use all of your RAM if it can, and politely return it when the OS requests.
+
+Runs on macOS 14+ or Linux with X11 or Wayland.
 
 Download macOS and Linux binaries from [Releases](https://github.com/asingleoat/yekk/releases).
 
