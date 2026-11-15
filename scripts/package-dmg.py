@@ -69,6 +69,10 @@ def resolve(dep, owner, executable):
 with tempfile.TemporaryDirectory(prefix='yekk-dmg-') as temporary:
     stage = Path(temporary) / 'volume'; stage.mkdir()
     app = stage / 'Yekk.app'; shutil.copytree(source, app, symlinks=True)
+    # Nix package directories are read-only; only the staging copy is modified.
+    for directory in [app, *app.rglob('*')]:
+        if directory.is_dir() and not directory.is_symlink():
+            directory.chmod(directory.stat().st_mode | 0o200)
     executable = source / 'Contents/MacOS/yekk'
     copied_executable = app / 'Contents/MacOS/yekk'
     libraries = app / 'Contents/Frameworks'; libraries.mkdir(exist_ok=True)
