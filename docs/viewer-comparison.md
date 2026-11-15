@@ -19,28 +19,29 @@ The main result is the sum of the 14 action times, excluding the fixed pauses.
 Each time bar shows the fastest complete run of six. Colors separate the first
 photo, the next two photos and the two return visits. Ticks show all six runs.
 All parts of a bar come from the same run.
-Memory bars show the largest peak viewer RSS across the six runs. RSS is memory
+Memory bars show the largest sampled peak viewer RSS across the six runs. RSS is memory
 held in RAM by that process; it excludes the separate display server and test driver.
 
 ## Results
 
 | Images | Viewer | Minimum wait (s) | Maximum wait (s) | Peak RAM (GiB) |
 | --- | --- | ---: | ---: | ---: |
-| TIFF | Yekk | 1.38 | 2.77 | 6.08 |
-| TIFF | feh | 17.57 | 20.60 | 4.63 |
-| TIFF | imv | 26.23 | 30.95 | 4.45 |
-| JPEG | Yekk | 0.54 | 0.86 | 0.84 |
-| JPEG | feh | 0.96 | 1.16 | 0.28 |
-| JPEG | imv | 1.24 | 2.04 | 0.57 |
+| TIFF | Yekk | 1.73 | 3.29 | 6.05 |
+| TIFF | feh | 16.69 | 24.62 | 4.62 |
+| TIFF | imv | 25.83 | 39.69 | 5.50 |
+| JPEG | Yekk | 0.50 | 0.66 | 0.75 |
+| JPEG | feh | 0.92 | 1.53 | 0.28 |
+| JPEG | imv | 1.17 | 2.25 | 0.57 |
 
-The first 100% TIFF view took 13 ms in one Yekk run and 200–720 ms in the other
-five. feh and imv took 10–38 ms for that action. For the first fitted JPEG view,
-minimum time was 0.24 s for feh and 0.44 s for Yekk.
+The first 100% TIFF view took 17–173 ms in five Yekk runs and 628 ms in one.
+feh and imv took 9–28 ms for that action. For the first fitted JPEG view,
+minimum time was 0.23 s for feh and 0.40 s for Yekk.
 
 ## Conditions
 
 - AMD Ryzen 9 7950X, 16 cores; 125 GiB usable RAM. Other jobs ran on the machine.
-- Yekk source `ce189c0`, ReleaseSafe, debug allocator disabled; feh 3.13.1; imv 5.0.1.
+- Dynamically linked Yekk source `f5ee31f`, ReleaseFast, baseline CPU target,
+  debug allocator disabled; feh 3.13.1; imv 5.0.1.
 - Three 239 MP RGB TIFF scans, 16 bits per channel, with Deflate compression, 1.09–1.24 GB each.
 - JPEG copies of the same photos: 23–24 MP RGB, 8 bits per channel, quality 90, 5–14 MB each.
 - A 960×640-pixel window on a private Xvfb X11 display at scale 1.
@@ -52,7 +53,9 @@ minimum time was 0.24 s for feh and 0.44 s for Yekk.
 
 Read all three files before starting each viewer process. This populates the OS
 file cache. Each process starts with no decoded images. This is a file-cache-warm
-test, not a storage-speed test. No host caches are flushed.
+test, not a storage-speed test. No host caches are flushed. Some processes still
+reported physical reads. The CSV records these as `physical_read_bytes`, a
+cumulative counter for each process.
 
 Run all six viewer-order permutations once, in a fixed shuffled order. Keep every
 completed trial. Minimum times reduce the effect of unrelated work that can delay
@@ -76,14 +79,19 @@ under memory pressure. The scans are private and are not distributed.
 
 ## Repeat the task
 
-Build a production binary as described in the [README](../README.md#build-and-run).
+Enter the Nix shell as described in the [README](../README.md#build-and-run).
+Build with the recorded mode and CPU target:
+
+```sh
+zig build -Doptimize=ReleaseFast -Dcpu=baseline
+```
 Use a new output directory for each binary, configuration or image set.
 On Linux, get the benchmark tools from the pinned Nix input:
 
 ```sh
 mkdir -p dist
 nix build --impure --expr '
-  let f = builtins.getFlake (toString ./.);
+  let f = builtins.getFlake ("git+file://" + toString ./.);
       p = import f.inputs.nixpkgs-unstable { system = builtins.currentSystem; };
   in p.buildEnv {
     name = "viewer-benchmark-tools";
@@ -95,9 +103,9 @@ export PATH="$PWD/dist/viewer-tools/bin:$PATH"
 
 ```sh
 python3 scripts/compare-viewers.py --calibrate --output dist/viewers \
-  --yekk zig-out/bin/yekk photo1.tif photo2.tif photo3.tif
+  --yekk zig-out/bin/yekk --build-mode ReleaseFast photo1.tif photo2.tif photo3.tif
 python3 scripts/compare-viewers.py --rounds 6 --output dist/viewers \
-  --yekk zig-out/bin/yekk photo1.tif photo2.tif photo3.tif
+  --yekk zig-out/bin/yekk --build-mode ReleaseFast photo1.tif photo2.tif photo3.tif
 ```
 
 Inspect the reference captures before accepting timings. Raw measurements, logs
@@ -106,7 +114,7 @@ is restricted to the display created by the script.
 
 See the [action times](assets/viewer-comparison.csv) and
 [build and image metadata](assets/viewer-comparison.json).
-Regenerate the chart with:
+The chart uses the CSV and its matching JSON report. Regenerate it with:
 
 ```sh
 python3 scripts/compare-viewers.py --plot-csv docs/assets/viewer-comparison.csv \

@@ -136,6 +136,10 @@ def chart(source, output):
             "Title": "Yekk, feh and imv: photo-review waiting time and peak RAM",
         },
     )
+    if output.suffix.lower() == ".svg":
+        output.write_text(
+            "\n".join(line.rstrip() for line in output.read_text().splitlines()) + "\n"
+        )
     plt.close(fig)
 
 
