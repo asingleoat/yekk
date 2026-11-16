@@ -8,6 +8,12 @@ const Geometry = t.Geometry;
 fn elapsed(start: u64) f64 {
     return @as(f64, @floatFromInt(c.SDL_GetPerformanceCounter() - start)) * 1000 / @as(f64, @floatFromInt(c.SDL_GetPerformanceFrequency()));
 }
+fn refreshInterval(w: *t.Window) void {
+    const mode = c.SDL_GetCurrentDisplayMode(c.SDL_GetDisplayForWindow(w.window));
+    if (mode == null) return;
+    const rate: f64 = @floatCast(mode.*.refresh_rate);
+    if (std.math.isFinite(rate) and rate > 0) w.refresh_interval = 1 / rate;
+}
 pub fn open(software: c_int, start_fullscreen: c_int, borderless: c_int) c_int {
     const w = t.current();
     if (c.SDL_WasInit(c.SDL_INIT_VIDEO) & c.SDL_INIT_VIDEO == 0) {
@@ -22,10 +28,13 @@ pub fn open(software: c_int, start_fullscreen: c_int, borderless: c_int) c_int {
     w.content_scale = 1;
     w.output_epoch.store(1, .release);
     w.worker_epoch = 1;
+    refreshInterval(w);
     if (software == 0 and c.getenv("SDL_RENDER_DRIVER") == null) {
         w.gpu = c.SDL_CreateGPUDevice(c.SDL_GPU_SHADERFORMAT_SPIRV, false, null);
         if (w.gpu != null and c.SDL_ClaimWindowForGPUDevice(w.gpu, w.window)) {
-            const mode: c.SDL_GPUPresentMode = if (c.SDL_WindowSupportsGPUPresentMode(w.gpu, w.window, c.SDL_GPU_PRESENTMODE_IMMEDIATE)) c.SDL_GPU_PRESENTMODE_IMMEDIATE else c.SDL_GPU_PRESENTMODE_MAILBOX;
+            // Keep submitted images in order. Acquisition below is nonblocking;
+            // a full vsync queue defers presentation instead of waiting on UI.
+            const mode: c.SDL_GPUPresentMode = c.SDL_GPU_PRESENTMODE_VSYNC;
             if (c.SDL_WindowSupportsGPUPresentMode(w.gpu, w.window, mode) and c.SDL_SetGPUSwapchainParameters(w.gpu, w.window, c.SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode)) {
                 w.swapchain_format = c.SDL_GetGPUSwapchainTextureFormat(w.gpu, w.window);
                 _ = c.fprintf(c.stderr, "SDL video=%s presentation=gpu-%s (worker upload)\n", c.SDL_GetCurrentVideoDriver(), c.SDL_GetGPUDeviceDriver(w.gpu));
@@ -295,6 +304,7 @@ pub fn verify(frame: *Frame) c_int {
 pub fn present(frame: *Frame) c_int {
     if (render.frameCurrent(frame) == 0) return 2;
     const w = t.current();
+    refreshInterval(w);
     const started = c.SDL_GetPerformanceCounter();
     if (w.gpu != null) {
         const command = c.SDL_AcquireGPUCommandBuffer(w.gpu) orelse return -1;

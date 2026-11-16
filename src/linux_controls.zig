@@ -55,6 +55,7 @@ pub const Controller = struct {
     playing: bool = false,
     deadline: ?f64 = null,
     shown_index: ?usize = null,
+    held_advance: navigation.HeldAdvance = .{},
     selection_serial: u64 = 0,
     shuffle_wrap: bool = false,
     info: bool = false,
@@ -91,6 +92,7 @@ pub const Controller = struct {
         if (self.position == position and self.shown_index != null) return false;
         self.position = position;
         self.selection_serial += 1;
+        self.held_advance.selected();
         if (!self.settings.keep_view) {
             request.view = .initial(self.settings.fit, self.initial_zoom);
             request.view_source = null;
@@ -142,6 +144,8 @@ pub const Controller = struct {
         }
     }
     pub fn presented(self: *Controller, index: usize, now: f64) void {
+        if (self.count == 0 or self.order[self.position] != index) return;
+        self.held_advance.presented(now);
         if (self.shown_index != index) {
             self.shown_index = index;
             self.deadline = if (self.playing and self.settings.interval > 0) now + self.settings.interval else null;
@@ -293,8 +297,8 @@ test "removal retains stable catalog IDs and nonwrapping neighbor order" {
     try std.testing.expect(!model.step(false, false, &request).changed);
 }
 
-// Navigation follows requested selection, even if the worker has not presented it.
-test "repeated navigation advances immediately and can reverse before presentation" {
+// Separate presses may skip a slow image. Native auto-repeat uses HeldAdvance.
+test "separate navigation commands advance and reverse before presentation" {
     var model: Controller = .{ .settings = .init() };
     model.settings.wrap = false;
     var request: Request = .{};
@@ -307,4 +311,31 @@ test "repeated navigation advances immediately and can reverse before presentati
     try std.testing.expectEqual(@as(usize, 5), request.index);
     model.presented(request.index, 1);
     try std.testing.expectEqual(@as(?usize, 5), model.shown_index);
+}
+
+test "held steps wait for presentation while a fresh press skips a pending image" {
+    var model: Controller = .{ .settings = .init() };
+    var request: Request = .{};
+    model.start(8, 0, &request);
+    model.presented(0, 0);
+    model.held_advance.press(9, .next);
+    try std.testing.expect(model.step(false, false, &request).changed);
+    for (0..100) |_| model.held_advance.repeat(9, .next);
+    try std.testing.expect(model.held_advance.take(100) == null);
+    model.presented(0, 101); // A stale completion cannot admit another step.
+    try std.testing.expect(model.held_advance.take(102) == null);
+    model.presented(1, 103);
+    const direction = model.held_advance.take(103).?;
+    try std.testing.expect(model.step(direction == .previous, false, &request).changed);
+    try std.testing.expectEqual(@as(usize, 2), request.index);
+    model.held_advance.repeat(9, .next);
+    model.held_advance.release(9);
+    model.held_advance.press(9, .next);
+    try std.testing.expect(model.step(false, false, &request).changed);
+    try std.testing.expectEqual(@as(usize, 3), request.index); // Image 2 need not finish.
+    model.held_advance.repeat(9, .next);
+    model.held_advance.release(9);
+    model.presented(3, 104);
+    try std.testing.expect(model.held_advance.take(105) == null);
+    try std.testing.expectEqual(@as(usize, 3), request.index);
 }

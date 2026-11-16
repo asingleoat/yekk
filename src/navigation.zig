@@ -3,6 +3,52 @@ const std = @import("std");
 const actions = @import("actions.zig");
 const catalog = @import("catalog.zig");
 pub const Step = union(enum) { stay, hold, quit, select: struct { position: usize, wrapped: bool } };
+
+/// Fresh presses remain immediate. Auto-repeat retains one pending step until
+/// a display refresh has passed the current selection's first presentation.
+pub const HeldAdvance = struct {
+    pub const Direction = enum { next, previous };
+    held: ?struct { key: u32, direction: Direction, pending: bool = false } = null,
+    presentation: union(enum) { waiting, submitted: f64 } = .waiting,
+
+    pub fn press(self: *HeldAdvance, key: u32, direction: Direction) void {
+        self.held = .{ .key = key, .direction = direction };
+    }
+    pub fn repeat(self: *HeldAdvance, key: u32, direction: Direction) void {
+        if (self.held) |*held| if (held.key == key and held.direction == direction) {
+            held.pending = true;
+        };
+    }
+    pub fn release(self: *HeldAdvance, key: u32) void {
+        if (self.held) |held| if (held.key == key) self.cancel();
+    }
+    pub fn cancel(self: *HeldAdvance) void {
+        self.held = null;
+    }
+    pub fn selected(self: *HeldAdvance) void {
+        self.presentation = .waiting;
+    }
+    pub fn presented(self: *HeldAdvance, time: f64) void {
+        if (self.presentation == .waiting) self.presentation = .{ .submitted = time };
+    }
+    pub fn pending(self: HeldAdvance) bool {
+        return if (self.held) |held| held.pending else false;
+    }
+    pub fn submitted(self: HeldAdvance) ?f64 {
+        if (!self.pending()) return null;
+        return switch (self.presentation) {
+            .waiting => null,
+            .submitted => |time| time,
+        };
+    }
+    pub fn take(self: *HeldAdvance, displayed_through: f64) ?Direction {
+        const at = self.submitted() orelse return null;
+        if (displayed_through < at) return null;
+        const held = &self.held.?;
+        held.pending = false;
+        return held.direction;
+    }
+};
 pub fn step(current: usize, count: usize, delta: isize, timed: bool, settings: *const actions.Settings) Step {
     if (count == 0) return .stay;
     const raw = @as(isize, @intCast(current)) + delta;
@@ -56,4 +102,45 @@ test "manual boundaries and slideshow endpoints use one policy" {
     settings.slideshow_loop = true;
     const next = step(2, 3, 1, true, &settings).select;
     try std.testing.expect(next.position == 0 and next.wrapped);
+}
+
+test "held navigation coalesces repeats until a displayed frame and stops on release" {
+    var held: HeldAdvance = .{};
+    held.press(9, .next);
+    held.selected();
+    for (0..1000) |_| held.repeat(9, .next);
+    try std.testing.expect(held.take(1000) == null);
+    held.presented(1001);
+    try std.testing.expect(held.take(1000.999) == null);
+    try std.testing.expectEqual(HeldAdvance.Direction.next, held.take(1001).?);
+    try std.testing.expect(held.take(1002) == null);
+    held.selected();
+    held.repeat(9, .next);
+    held.release(8); // Another key cannot release this one.
+    try std.testing.expect(held.pending());
+    held.release(9);
+    held.presented(1003);
+    try std.testing.expect(held.take(1004) == null);
+    held.repeat(9, .next); // Ignore repeat events left after release/focus loss.
+    try std.testing.expect(!held.pending());
+}
+
+test "a new press discards an older queued repeat and may skip an unseen selection" {
+    var held: HeldAdvance = .{};
+    held.press(9, .next);
+    held.selected();
+    held.repeat(9, .next);
+    held.press(9, .next);
+    try std.testing.expect(!held.pending());
+    held.selected();
+    held.repeat(9, .next);
+    held.presented(1);
+    held.presented(2); // Detail/overlay updates cannot postpone the first frame.
+    try std.testing.expectEqual(HeldAdvance.Direction.next, held.take(1).?);
+    held.press(8, .previous);
+    held.repeat(9, .next);
+    try std.testing.expect(!held.pending());
+    held.repeat(8, .previous);
+    held.cancel();
+    try std.testing.expect(held.take(3) == null);
 }

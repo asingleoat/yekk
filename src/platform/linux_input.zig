@@ -151,9 +151,12 @@ fn context(window: ?*c.SDL_Window) ?*t.Window {
     return @ptrCast(@alignCast(c.SDL_GetPointerProperty(c.SDL_GetWindowProperties(window), "yekk.context", null)));
 }
 pub fn event(out: *t.Event) void {
+    eventWithTimeout(out, 8);
+}
+pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
     out.* = .{};
     var e: c.SDL_Event = undefined;
-    if (!c.SDL_WaitEventTimeout(&e, 8)) return;
+    if (!c.SDL_WaitEventTimeout(&e, timeout_ms)) return;
     if (e.type == wake_event) {
         wake_pending.store(false, .release);
         return;
@@ -168,8 +171,19 @@ pub fn event(out: *t.Event) void {
         c.SDL_EVENT_KEY_DOWN => {
             out.window_id = e.key.windowID;
             out.kind = 2;
+            out.key_code = if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) @intCast(e.key.scancode) else @intCast(e.key.key);
+            out.repeated = e.key.repeat;
             out.key = portableKey(if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) c.SDL_GetKeyFromScancode(e.key.scancode, e.key.mod, false) else e.key.key);
             out.modifiers = @as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_SHIFT != 0)) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_CTRL != 0)) << 1) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_ALT != 0)) << 2) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_GUI != 0)) << 3);
+        },
+        c.SDL_EVENT_KEY_UP => {
+            out.window_id = e.key.windowID;
+            out.kind = 13;
+            out.key_code = if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) @intCast(e.key.scancode) else @intCast(e.key.key);
+        },
+        c.SDL_EVENT_WINDOW_FOCUS_LOST => {
+            out.window_id = e.window.windowID;
+            out.kind = 14;
         },
         c.SDL_EVENT_DROP_BEGIN => {
             out.window_id = e.drop.windowID;

@@ -1111,6 +1111,8 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
     }
     if (ui.ready) {
         var effect: controls.Effect = .{};
+        if (event.kind == 13) state.controller.held_advance.release(event.key_code);
+        if (event.kind == 14) state.controller.held_advance.cancel();
         var confirmation_changed = false;
         if (ui.trash_confirmation) |job| {
             if (event.kind == 2 or event.kind == 3 or event.kind == 4 or event.kind == 6 or event.kind == 8 or event.kind == 9) {
@@ -1128,6 +1130,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         }
         var menu_action: ?actions.Action = null;
         if (event.kind == 6 and event.key == 3) {
+            state.controller.held_advance.cancel();
             ui.menu.open = !ui.menu.open;
             ui.menu.x = @intFromFloat(event.x);
             ui.menu.y = @intFromFloat(event.y);
@@ -1169,7 +1172,20 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             effect.changed = true;
         }
         if (event.kind == 2 and event.key > 0 and event.key <= 65535) {
-            if (state.controller.settings.lookup(@intCast(event.key), modifiers(event.modifiers))) |action| effect = state.controller.apply(action, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
+            if (state.controller.settings.lookup(@intCast(event.key), modifiers(event.modifiers))) |action| {
+                if (action == .next or action == .previous) {
+                    const direction: @import("navigation.zig").HeldAdvance.Direction = if (action == .next) .next else .previous;
+                    if (event.repeated) {
+                        state.controller.held_advance.repeat(event.key_code, direction);
+                    } else {
+                        state.controller.held_advance.press(event.key_code, direction);
+                        effect = state.controller.apply(action, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
+                    }
+                } else {
+                    if (!event.repeated) state.controller.held_advance.cancel();
+                    effect = state.controller.apply(action, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
+                }
+            } else if (!event.repeated) state.controller.held_advance.cancel();
             if (state.config.test_keys != null) effect.changed = true;
         }
         if (event.kind == 3 and event.y != 0) effect = state.controller.step(event.y > 0, false, &ui.request);
@@ -1311,6 +1327,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         ui.retiring = result.pixels;
     };
     var failed = false;
+    var failed_revision: u64 = 0;
     var render_failed = false;
     var retained_failure = false;
     var reload_busy = false;
@@ -1337,6 +1354,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         reclaimed = state.inactive_reclaimed.load(.acquire);
         render_failed = state.render_failed_revision == ui.request.revision;
         failed = (state.entries[ui.request.index].failed and !retained_failure) or state.render_failed_revision == ui.request.revision;
+        failed_revision = ui.request.revision;
         hook_done = ui.hook_submitted and !state.hook_pending and !state.hook_running;
         hook_failed = state.hook_failed;
         if (ui.hook_serial != state.hook_finished) {
@@ -1360,8 +1378,15 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         ui.notice_text = if (hook_failed) "Command failed (see stderr)" else "Command completed";
     }
     if (ui.ready and ui.trash_confirmation == null) {
+        // A refresh interval after submission leaves each selected image on
+        // screen for a frame. GPU presentation uses FIFO without waiting here.
+        if (state.controller.held_advance.take(runtime.now() - native.types.current().refresh_interval)) |direction| {
+            const effect = state.controller.step(direction == .previous, false, &ui.request);
+            if (effect.quit) return .close;
+            if (effect.changed) ui.dirty = true;
+        }
         const was_playing = state.controller.playing;
-        const tick = state.controller.tick(runtime.now(), failed, &ui.request);
+        const tick = state.controller.tick(runtime.now(), failed and failed_revision == ui.request.revision, &ui.request);
         if (tick.quit) return .close;
         if (tick.changed) ui.dirty = true;
         if (was_playing != state.controller.playing and state.controller.info) {
@@ -1530,8 +1555,9 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         runtime.output(1, "WATCH_RETAINED\n");
         ui.watch_stage = 2;
     }
-    if (failed) {
+    if (failed and failed_revision == ui.request.revision) {
         native.window.title(if (render_failed) "Yekk — RenderFailed (see stderr)" else "Yekk — DecodeFailed (see stderr)");
+        state.controller.held_advance.presented(runtime.now());
         if (state.config.smoke or state.config.smoke_hook or state.config.smoke_reload or state.config.smoke_resize or state.config.recovery_test or state.config.native_recovery_test or state.config.stress > 0) return if (render_failed) error.RenderFailed else error.DecodeFailed;
     }
     if (state.config.smoke_hook and hook_done) {
@@ -1668,7 +1694,15 @@ fn viewer(application: *Application) !void {
     var live: usize = 1;
     while (live > 0) {
         var incoming: native.Event = undefined;
-        native.input.event(&incoming);
+        var timeout_ms: c_int = 8;
+        const now = runtime.now();
+        for (&application.slots) |*slot| if (slot.status == .active and slot.ui.ready and slot.ui.trash_confirmation == null) {
+            if (slot.state.controller.held_advance.submitted()) |at| {
+                const until = @max(0, at + slot.native.refresh_interval - now);
+                timeout_ms = @min(timeout_ms, @as(c_int, @intFromFloat(@ceil(@min(0.008, until) * 1000))));
+            }
+        };
+        native.input.eventWithTimeout(&incoming, timeout_ms);
         if (incoming.kind == 10) closeAll(application);
         for (&application.slots) |*slot| {
             if (slot.status == .vacant) continue;

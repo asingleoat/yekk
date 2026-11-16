@@ -243,6 +243,10 @@ Hold an arrow key to repeat navigation or zoom at the system repeat rate.
 | x | Close this window. |
 | q / Escape | Quit all windows. |
 
+Hold a next or previous key to view images in order. Each image stays on screen
+for at least one frame before another key repeat can advance. Release the key to
+stop. A new press can skip an image that is still loading.
+
 For directory navigation, consecutive images from one directory form a group.
 `[` and `]` move between those groups in the existing image list.
 They do not search for more images.

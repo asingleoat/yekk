@@ -56,6 +56,8 @@ pub const Frame = struct {
 pub const Event = struct {
     kind: c_int = 0,
     key: c_int = 0,
+    key_code: u32 = 0,
+    repeated: bool = false,
     x: f32 = 0,
     y: f32 = 0,
     anchor_x: f32 = 0,
@@ -70,6 +72,7 @@ pub const Metadata = struct { width: u32 = 0, height: u32 = 0, bits: u32 = 0, fo
 pub const window_limit = 8;
 pub const Selection = struct { bytes: [1048576]u8 = undefined, offsets: [16384]u32 = undefined, count: u32 = 0, used: u32 = 0, window_id: u32 = 0 };
 pub const Window = struct {
+    refresh_interval: f64 = 1.0 / 60.0,
     window: ?*c.SDL_Window = null,
     renderer: ?*c.SDL_Renderer = null,
     gpu: ?*c.SDL_GPUDevice = null,

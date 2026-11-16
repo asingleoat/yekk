@@ -196,6 +196,8 @@ const State = struct {
     render_presented: ?Prepared = null,
     render_revision: u64 = 0,
     render_presented_revision: u64 = 0,
+    held_advance: navigation.HeldAdvance = .{},
+    advance_display_link: O = nil,
     render_failed_revision: u64 = 0,
     worker_render_ms: f64 = 0,
     worst_native_contents_ms: f64 = 0,
@@ -410,6 +412,7 @@ fn updateStatus(context: ?*anyopaque) callconv(.c) void {
     const loading = render_pending or s.desired != null and (s.displayed != s.desired or (s.current != null and s.cached[s.desired.?].image_version != s.cached[s.desired.?].version));
     const text = if (s.notice_len > 0) std.fmt.bufPrint(&buffer, "{s} — {s}", .{ shown, s.notice[0..s.notice_len] }) catch shown else if (s.settings.error_line != 0) std.fmt.bufPrint(&buffer, "{s} — config error on line {d}", .{ shown, s.settings.error_line }) catch shown else if (failed) std.fmt.bufPrint(&buffer, "{s} — {s}: {s}", .{ shown, target, @errorName(s.cached[s.desired.?].failure.?) }) catch shown else if (loading or (s.desired != null and s.current == null)) std.fmt.bufPrint(&buffer, "{s} — loading {s}", .{ shown, target }) catch shown else if (s.indexing and s.current == null) "Yekk — discovering images…" else if (s.current) |image| std.fmt.bufPrint(&buffer, "{s} — {d}/{d} · {d:.0}%{s}", .{ shown, (position(s.displayed.?) orelse 0) + 1, s.entries.len, s.geometry.scale * 100, if (image.width < image.source_width or image.height < image.source_height) " · preview" else "" }) catch shown else "Yekk — Command-O to open images";
     setText(s.window, "setTitle:", text);
+    if (failed) s.held_advance.presented(n.CACurrentMediaTime());
     updateOverlay();
 }
 fn detach(id: usize) void {
@@ -745,6 +748,7 @@ fn applyPrepared(wanted: Prepared, revision: u64, surface: n.Ref) bool {
     wanted.source.usedSurface();
     s.render_presented = wanted;
     s.render_presented_revision = revision;
+    s.held_advance.presented(n.CACurrentMediaTime());
     s.last_slide = n.now();
     s.slide_failures = 0;
     if (s.switch_started > 0) {
@@ -765,6 +769,7 @@ fn select(index: usize, reload: bool) void {
     };
     s.desired = id;
     s.selection_revision += 1;
+    s.held_advance.selected();
     s.render_revision += 1;
     s.render_wanted = null;
     s.preview_wanted = null;
@@ -1112,6 +1117,12 @@ fn windowWillClose(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) vo
     useSession(self);
     if (s.closing) return;
     s.closing = true;
+    stopHeldAdvance();
+    if (s.advance_display_link.value != null) {
+        s.advance_display_link.msgSend(void, "invalidate", .{});
+        s.advance_display_link.release();
+        s.advance_display_link = nil;
+    }
     s.render_revision += 1;
     s.render_wanted = null;
     s.cancel.store(true, .release);
@@ -1771,6 +1782,49 @@ fn resized(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
 fn accepts(_: objc.c.id, _: objc.c.SEL) callconv(.c) bool {
     return true;
 }
+fn stopHeldAdvance() void {
+    s.held_advance.cancel();
+    s.advance_display_link.msgSend(void, "setPaused:", .{true});
+}
+fn scheduleHeldAdvance() void {
+    if (!s.held_advance.pending()) return;
+    if (s.advance_display_link.value == null) {
+        const link = s.view.msgSend(O, "displayLinkWithTarget:selector:", .{ s.delegate, objc.sel("advanceFrame:") });
+        if (link.value == null) return;
+        s.advance_display_link = link.msgSend(O, "retain", .{});
+        const run_loop = cls("NSRunLoop").msgSend(O, "mainRunLoop", .{});
+        const mode: O = .{ .value = @ptrCast(@alignCast(@constCast(n.NSRunLoopCommonModes))) };
+        link.msgSend(void, "addToRunLoop:forMode:", .{ run_loop, mode });
+    }
+    s.advance_display_link.msgSend(void, "setPaused:", .{false});
+}
+fn advanceFrame(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    useSession(self);
+    if (s.closing) return;
+    const link: O = .{ .value = raw };
+    // timestamp is the refresh that has passed, not the next target refresh.
+    const through = link.msgSend(f64, "timestamp", .{});
+    if (std.math.isFinite(through)) if (s.held_advance.take(through)) |direction| {
+        perform(if (direction == .next) .next else .previous);
+    };
+    if (!s.held_advance.pending()) s.advance_display_link.msgSend(void, "setPaused:", .{true});
+}
+fn keyUp(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    useSession(self);
+    const event: O = .{ .value = raw };
+    s.held_advance.release(event.msgSend(u16, "keyCode", .{}));
+    if (!s.held_advance.pending()) s.advance_display_link.msgSend(void, "setPaused:", .{true});
+}
+fn resignedKey(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    useSession(self);
+    stopHeldAdvance();
+}
 fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
     defer s = previous;
@@ -1779,13 +1833,29 @@ fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const chars = event.msgSend(O, "charactersIgnoringModifiers", .{});
     if (chars.msgSend(usize, "length", .{}) == 0) return;
     const key = chars.msgSend(u16, "characterAtIndex:", .{@as(usize, 0)});
+    const repeated = event.msgSend(bool, "isARepeat", .{});
+    const action = s.settings.lookup(key, event.msgSend(usize, "modifierFlags", .{}));
+    if (action == .next or action == .previous) {
+        const direction: navigation.HeldAdvance.Direction = if (action == .next) .next else .previous;
+        const code = event.msgSend(u16, "keyCode", .{});
+        if (repeated) {
+            s.held_advance.repeat(code, direction);
+            scheduleHeldAdvance();
+        } else {
+            stopHeldAdvance();
+            s.held_advance.press(code, direction);
+            perform(action.?);
+        }
+        return;
+    }
+    if (!repeated) stopHeldAdvance();
     if (key == 0x1B) {
         if (s.show_help or s.show_info) {
             s.show_help = false;
             s.show_info = false;
             updateOverlay();
-        } else if (s.settings.lookup(key, event.msgSend(usize, "modifierFlags", .{}))) |action| perform(action);
-    } else if (s.settings.lookup(key, event.msgSend(usize, "modifierFlags", .{}))) |action| perform(action);
+        } else if (action) |bound| perform(bound);
+    } else if (action) |bound| perform(bound);
 }
 fn scroll(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
@@ -1864,6 +1934,7 @@ fn rightMouseDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) v
     const previous = s;
     defer s = previous;
     useSession(self);
+    stopHeldAdvance();
     showMenu(.{ .value = raw });
 }
 fn middleMouseDown(self: objc.c.id, selector: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
@@ -2027,12 +2098,15 @@ fn initializeNative() !void {
     addMethod(delegate_class, "performAction:", actionClicked);
     addMethod(delegate_class, "tick:", tick);
     addMethod(delegate_class, "windowDidBecomeKey:", becameKey);
+    addMethod(delegate_class, "windowDidResignKey:", resignedKey);
+    addMethod(delegate_class, "advanceFrame:", advanceFrame);
     if (!nativeBool(c.class_addIvar(delegate_class.value, "yekkState", @sizeOf(*State), 3, "^v"))) return error.NativeInitialization;
     objc.registerClassPair(delegate_class);
     control.session_class = delegate_class;
     const view_class = objc.allocateClassPair(cls("NSView"), "YekkView") orelse return error.NativeInitialization;
     addMethod(view_class, "acceptsFirstResponder", accepts);
     addMethod(view_class, "keyDown:", keyDown);
+    addMethod(view_class, "keyUp:", keyUp);
     addMethod(view_class, "scrollWheel:", scroll);
     addMethod(view_class, "magnifyWithEvent:", magnify);
     addMethod(view_class, "mouseDown:", mouseDown);
@@ -2136,10 +2210,13 @@ fn automationReady() bool {
     return true;
 }
 fn smokeKey(key: []const u8, modifiers: usize) void {
+    smokeKeyEvent(key, modifiers, .press);
+}
+fn smokeKeyEvent(key: []const u8, modifiers: usize, kind: enum { press, repeat, release }) void {
     const chars = string(key);
     defer chars.release();
-    const event = cls("NSEvent").msgSend(O, "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{ @as(usize, 10), n.Point{ .x = 0, .y = 0 }, modifiers, @as(f64, 0), s.window.msgSend(isize, "windowNumber", .{}), nil, chars, chars, false, @as(u16, 0) });
-    s.view.msgSend(void, "keyDown:", .{event});
+    const event = cls("NSEvent").msgSend(O, "keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:", .{ @as(usize, if (kind == .release) 11 else 10), n.Point{ .x = 0, .y = 0 }, modifiers, @as(f64, 0), s.window.msgSend(isize, "windowNumber", .{}), nil, chars, chars, kind == .repeat, @as(u16, 0) });
+    if (kind == .release) s.view.msgSend(void, "keyUp:", .{event}) else s.view.msgSend(void, "keyDown:", .{event});
 }
 fn snapshotForTest() void {
     const path = s.snapshot_path orelse return;
@@ -2271,12 +2348,37 @@ fn automated(context: ?*anyopaque) callconv(.c) void {
             perform(.info);
             perform(.background);
             perform(.background);
-            s.smoke_stage = 5;
+            s.smoke_stage = if (s.cli.smoke_windows) 5 else 4;
             if (!s.cli.smoke_windows and s.slot == 0) {
                 confirmTrash();
                 if (s.alert.value != null) s.window.msgSend(void, "endSheet:returnCode:", .{ s.alert.msgSend(O, "window", .{}), @as(i64, 1001) });
             }
             pump();
+        },
+        4 => {
+            smokeKey("n", 0); // Fresh press wraps from image 2 to image 0.
+            s.smoke_count = @intCast(s.selection_revision);
+            for (0..100) |_| smokeKeyEvent("n", 0, .repeat);
+            s.smoke_failed = s.smoke_failed or s.desired != s.entries[0].id or s.selection_revision != s.smoke_count;
+            s.smoke_stage = 7; // The real display-link callback must admit one step.
+        },
+        7 => {
+            if (s.desired == s.entries[0].id) return;
+            s.smoke_failed = s.smoke_failed or s.desired != s.entries[1].id or s.selection_revision != s.smoke_count + 1;
+            smokeKeyEvent("n", 0, .release);
+            smokeKey("n", 0);
+            for (0..100) |_| smokeKeyEvent("n", 0, .repeat);
+            smokeKeyEvent("n", 0, .release);
+            smokeKey("n", 0); // Skip image 2 before its next refresh.
+            smokeKeyEvent("n", 0, .release);
+            s.smoke_failed = s.smoke_failed or s.desired != s.entries[0].id or s.held_advance.pending();
+            s.smoke_stage = 8;
+        },
+        8 => {
+            s.smoke_failed = s.smoke_failed or s.desired != s.entries[0].id;
+            n.output(1, if (s.smoke_failed) "HELD_NAVIGATION_FAILED\n" else "HELD_NAVIGATION_PASSED\n");
+            s.smoke_stage = 5;
+            select(2, false);
         },
         5 => {
             if (s.cli.smoke_windows) testWindowOpens();

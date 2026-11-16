@@ -375,6 +375,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
             viewers={identifier:name for identifier,name in visible.items() if name.startswith(str(repeat_folder))}
             positions=[int(value) for value in re.findall(r'^VIEW index=(\d+)',text,re.M)]
             if not viewers or not positions:return
+            assert all(abs(b-a)<=1 for a,b in zip(positions,positions[1:])), 'held navigation skipped a displayed image'
             identifier=next(iter(viewers))
             now=time.monotonic()
             if phase[0]==0:

@@ -1,6 +1,8 @@
 //! Narrow, audited C ABI boundary. Objective-C messages use zig-objc.
 //! Opaque Core Foundation objects follow Create/Copy ownership rules.
 pub const Ref = *const anyopaque;
+pub extern "c" fn CACurrentMediaTime() f64;
+pub extern "c" var NSRunLoopCommonModes: Ref;
 pub const Point = extern struct { x: f64, y: f64 };
 pub const Size = extern struct { width: f64, height: f64 };
 pub const Rect = extern struct { origin: Point, size: Size };
