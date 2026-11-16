@@ -50,6 +50,7 @@ Tests that write source files use temporary copies.
 ```sh
 zig build test -Doptimize=ReleaseSafe -Ddebug-allocator=true
 zig build -Doptimize=ReleaseSafe -Ddebug-allocator=true
+zig build build-linux-fixtures -Dtest-desktop=true -Doptimize=ReleaseSafe
 python3 scripts/supervisor-test.py
 python3 scripts/linux-validation.py
 python3 scripts/linux-parity-test.py
@@ -58,6 +59,13 @@ python3 scripts/wayland-validation.py --parity
 python3 scripts/wayland-validation.py --parity --scale 2 --output dist/wayland-scale2.json
 python3 scripts/linux-memory-test.py
 ```
+
+On NixOS, run portable binaries through `steam-run`. Build test helpers in the
+development shell first. Use `--fixture zig-out/bin/linux-x11-fixture` with
+`linux-desktop-test.py`. Use `--fixture zig-out/bin/linux-file-manager-test` with
+`linux-parity-test.py` or `wayland-validation.py --parity`.
+For Trash checks, set `TMPDIR` to a writable directory on the home filesystem.
+The Steam runtime can mark its `/tmp` mount as internal and reject Trash there.
 
 Here, **parity** means matching macOS behavior for shared options and actions,
 not matching its execution times.

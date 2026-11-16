@@ -19,6 +19,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", default="zig-out/bin/yekk")
 parser.add_argument("--output", default="dist/linux-parity.json")
 parser.add_argument("--video-driver", default=os.environ.get("SDL_VIDEO_DRIVER", "dummy"))
+parser.add_argument("--fixture", type=Path, help="use a prebuilt linux-file-manager-test executable")
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
 os.chdir(root)
@@ -245,8 +246,11 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
     environment["YEKK_TEST_DESKTOP_ROOT"] = str(folder)
     # The service and bus are private to this test; never activate the desktop's
     # real file manager. Compile against the same locked GIO as the viewer.
-    subprocess.run(["zig", "build", "build-linux-fixtures", "-Dtest-desktop=true", "-Doptimize=ReleaseSafe", "-j2"], check=True)
-    manager = root / "zig-out/bin/linux-file-manager-test"
+    if args.fixture:
+        manager = args.fixture.resolve(strict=True)
+    else:
+        subprocess.run(["zig", "build", "build-linux-fixtures", "-Dtest-desktop=true", "-Doptimize=ReleaseSafe", "-j2"], check=True)
+        manager = root / "zig-out/bin/linux-file-manager-test"
     from private_bus import start_private_bus
     bus = start_private_bus(folder, environment)
     service = None

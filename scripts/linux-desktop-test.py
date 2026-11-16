@@ -20,6 +20,7 @@ parser.add_argument('--binary', default='zig-out/bin/yekk')
 parser.add_argument('--output', default='dist/linux-desktop-integration.json')
 parser.add_argument('--dialog-driver', choices=['zenity','portal'], default='zenity')
 parser.add_argument('--case', help='run cases containing this text')
+parser.add_argument('--fixture', type=Path, help='use a prebuilt linux-x11-fixture executable')
 parser.add_argument('--instant-click',action='store_true',help='stress complete XTest click batches')
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
@@ -60,8 +61,11 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
                        XDG_DATA_HOME=str(folder/'data'), XDG_STATE_HOME=str(folder/'state'),
                        XDG_CACHE_HOME=str(folder/'cache'), XDG_RUNTIME_DIR=str(folder/'runtime'), YEKK_TEST_TIMEOUT='90')
     (folder/'runtime').mkdir(mode=0o700)
-    subprocess.run(['zig','build','build-linux-fixtures','-Dtest-desktop=true','-Doptimize=ReleaseSafe','-j2'],check=True)
-    fixture = root/'zig-out/bin/linux-x11-fixture'
+    if args.fixture:
+        fixture = args.fixture.resolve(strict=True)
+    else:
+        subprocess.run(['zig','build','build-linux-fixtures','-Dtest-desktop=true','-Doptimize=ReleaseSafe','-j2'],check=True)
+        fixture = root/'zig-out/bin/linux-x11-fixture'
     display_read, display_write = os.pipe()
     xserver = subprocess.Popen(['Xvfb','-displayfd',str(display_write),'-screen','0','1280x960x24','-dpi','192','-nolisten','tcp','-noreset','-ac'],
                                pass_fds=[display_write], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
