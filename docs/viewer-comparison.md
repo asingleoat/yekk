@@ -26,24 +26,29 @@ held in RAM by that process; it excludes the separate display server and test dr
 
 | Images | Viewer | Minimum wait (s) | Maximum wait (s) | Peak RAM (GiB) |
 | --- | --- | ---: | ---: | ---: |
-| TIFF | Yekk | 1.73 | 3.29 | 6.05 |
-| TIFF | feh | 16.69 | 24.62 | 4.62 |
-| TIFF | imv | 25.83 | 39.69 | 5.50 |
-| JPEG | Yekk | 0.50 | 0.66 | 0.75 |
-| JPEG | feh | 0.92 | 1.53 | 0.28 |
-| JPEG | imv | 1.17 | 2.25 | 0.57 |
+| TIFF | Yekk | 2.04 | 2.68 | 5.99 |
+| TIFF | feh | 20.13 | 26.41 | 4.62 |
+| TIFF | imv | 32.38 | 43.19 | 5.51 |
+| JPEG | Yekk | 1.14 | 1.66 | 0.61 |
+| JPEG | feh | 1.71 | 2.08 | 0.28 |
+| JPEG | imv | 2.56 | 3.12 | 0.57 |
+| PNG | Yekk | 1.21 | 1.44 | 0.69 |
+| PNG | feh | 2.19 | 2.45 | 0.32 |
+| PNG | imv | 3.57 | 4.21 | 0.56 |
 
-The first 100% TIFF view took 17–173 ms in five Yekk runs and 628 ms in one.
-feh and imv took 9–28 ms for that action. For the first fitted JPEG view,
-minimum time was 0.23 s for feh and 0.40 s for Yekk.
+The first 100% TIFF view took 27–37 ms in three Yekk runs and 302–581 ms in the
+other three. feh and imv took 15–35 ms for that action. For the first fitted JPEG
+view, minimum time was 0.41 s for feh and 0.77 s for Yekk.
 
 ## Conditions
 
 - AMD Ryzen 9 7950X, 16 cores; 125 GiB usable RAM. Other jobs ran on the machine.
-- Dynamically linked Yekk source `f5ee31f`, ReleaseFast, baseline CPU target,
+- Dynamically linked Yekk source `c0691d2`, ReleaseFast, baseline CPU target,
   debug allocator disabled; feh 3.13.1; imv 5.0.1.
 - Three 239 MP RGB TIFF scans, 16 bits per channel, with Deflate compression, 1.09–1.24 GB each.
 - JPEG copies of the same photos: 23–24 MP RGB, 8 bits per channel, quality 90, 5–14 MB each.
+- PNG copies decoded from those JPEG files: the same pixels and dimensions,
+  8 bits per channel. Save with `vips pngsave --strip` to remove extra metadata.
 - A 960×640-pixel window on a private Xvfb X11 display at scale 1.
 - Yekk uses SDL software rendering; imv uses Mesa software OpenGL. feh uses Imlib2.
 - Yekk uses its default prefetch and cache policy. imv uses its default policy.
@@ -107,6 +112,8 @@ python3 scripts/compare-viewers.py --calibrate --output dist/viewers \
 python3 scripts/compare-viewers.py --rounds 6 --output dist/viewers \
   --yekk zig-out/bin/yekk --build-mode ReleaseFast photo1.tif photo2.tif photo3.tif
 ```
+
+Repeat with JPEG and PNG files, using a new output directory for each format.
 
 Inspect the reference captures before accepting timings. Raw measurements, logs
 and captures stay under `dist/`. GUI processes run under the supervisor and input

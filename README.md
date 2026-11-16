@@ -11,13 +11,13 @@ Download macOS and Linux binaries from [Releases](https://github.com/asingleoat/
 ## Performance
 
 Review three photos at fit-to-window and 100%, then revisit the first two.
-With 239 megapixel TIFFs, minimum total waiting time was 1.73 s for Yekk,
-16.69 s for feh and 25.83 s for imv.
+With 239 megapixel TIFFs, minimum total waiting time was 2.04 s for Yekk,
+20.13 s for feh and 32.38 s for imv.
 
-Yekk used more RAM. Its first 100% TIFF view took 0.63 s in one run.
+Yekk used more RAM. Its first 100% TIFF view took up to 0.58 s.
 feh opened the first JPEG faster than Yekk.
 
-![Waiting time and peak RAM for Yekk, feh and imv during TIFF and JPEG review](docs/assets/viewer-comparison.svg)
+![Waiting time and peak RAM for Yekk, feh and imv during TIFF, JPEG and PNG review](docs/assets/viewer-comparison.svg)
 
 This ReleaseFast Linux CPU test read all image files before each run to warm the
 OS file cache.
