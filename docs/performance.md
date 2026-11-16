@@ -48,10 +48,27 @@ and checks CRCs during the read. libdeflate expands the zlib stream. Zig restore
 row filters and expands samples to RGBA without a separate full-file copy.
 The common RGB8 path selects its pixel layout outside the pixel loop.
 
-Linux loads ordinary JPEGs through libjpeg-turbo directly. Zig stores compressed
+The shared JPEG adapter stores compressed
 input, pixels, ICC data and orientation buffers in one allocation. The native
 decoder does not retain another copy of Exif or ICC data. Rotated output uses
-small cache tiles. macOS keeps ImageIO for JPEG.
+small cache tiles.
+
+For sequential JPEG, Zig combines a Huffman symbol and its signed coefficient
+value in one lookup. Longer codes use a bounded canonical decoder. A pass removes
+byte stuffing in the owned input buffer. libjpeg-turbo retains the integer
+inverse transform, chroma upsampling and color output. The result must match its
+stock decoder byte for byte. Progressive images and images with restart markers
+retain the stock decoder.
+
+This path uses two internal callback prefixes audited for libjpeg-turbo 3.2.0
+with its version-6b ABI. Other library builds retain their existing decoder.
+The callback executes within TurboJPEG's C error boundary; Zig does not implement
+`setjmp` or `longjmp`. The tables use worker stack storage.
+
+On macOS, only supported sequential JPEGs with chroma subsampling use the shared
+path. Chroma subsampling stores fewer color samples than brightness samples.
+ImageIO retains full-chroma and other JPEG variants. This keeps its faster
+hardware path for the tested full-chroma scan.
 
 These paths reuse the worker queues and decoded-image cache. They do not add
 decode work to the UI thread. Production can return completed temporary-buffer

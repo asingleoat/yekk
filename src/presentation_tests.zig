@@ -52,6 +52,7 @@ test "optional GPU rendering preserves alpha, high precision and wide-gamut colo
     try compareIdentity("tests/fixtures/alpha.content", false, false);
     try compareIdentity("tests/fixtures/rgb16-orientation6.tif", false, false);
     try compareIdentity("tests/fixtures/rgb16-orientation1.tif", false, true);
+    try compareIdentity("tests/fixtures/jpeg-profile-sequential-srgb.jpg", false, false);
 }
 
 test "software viewport rendering preserves oriented RGB16, alpha and P3 profiles" {
@@ -67,6 +68,8 @@ test "software viewport rendering preserves oriented RGB16, alpha and P3 profile
         "tests/fixtures/rgb16-tiled-big.tif",
         "tests/fixtures/alpha.content",
         "tests/fixtures/gray16.png",
+        "tests/fixtures/jpeg-sequential-orientation6.jpg",
+        "tests/fixtures/jpeg-profile-sequential-srgb.jpg",
     }) |file| {
         try compareIdentity(file, true, false);
     }

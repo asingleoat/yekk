@@ -1,5 +1,6 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include <mach/mach.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/mman.h>

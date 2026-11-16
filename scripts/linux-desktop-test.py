@@ -155,12 +155,12 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
             rows=b''.join(b'\0'+rgb[y*width*3:(y+1)*width*3] for y in range(height))
             output.with_name(output.stem+suffix+'.png').write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
-        def exercise(name, arguments, drive, expected_phase=1):
+        def exercise(name, arguments, drive, expected_phase=1, prefetch=False):
             if args.case and args.case.casefold() not in name.casefold():
                 phase[0]=expected_phase
                 return
             run(['xdotool','keyup','q','Return','Right','Left','ctrl','shift','alt','super'])
-            command = [sys.executable,'scripts/supervise.py','--relay',str(binary),'--alloc-stats','--decode-workers','2','--no-prefetch',
+            command = [sys.executable,'scripts/supervise.py','--relay',str(binary),'--alloc-stats','--decode-workers','2',*([] if prefetch else ['--no-prefetch']),
                        '--trace-events','--test-wait',*map(str,arguments)]
             process = subprocess.Popen(command,env=environment,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             selector = selectors.DefaultSelector()
@@ -176,7 +176,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
                             captured[event.data].extend(data)
                             if args.case and event.data=='stdout':print(data.decode(errors='replace'),end='',flush=True)
                         else: selector.unregister(event.fileobj)
-                    drive(captured['stdout'].decode(), windows())
+                    drive(captured['stdout'].decode()+(captured['stderr'].decode() if prefetch else ''), windows())
                 result = {'name':name,'status':process.wait(timeout=5), **{key:value.decode() for key,value in captured.items()}}
                 report['cases'].append(result); output.write_text(json.dumps(report,indent=2)+'\n')
                 assert result['status']==0 and 'live_bytes=0' in result['stderr'] and phase[0]==expected_phase,result
@@ -406,6 +406,19 @@ with tempfile.TemporaryDirectory(prefix='yekk-native-desktop-') as temporary:
                 assert positions[-1]==held['left_stop'],'navigation continued after Left release'
                 key(identifier,'q');phase[0]=7
         exercise('held arrows repeatedly navigate and stop after release',['--no-wrap',repeat_folder],held_arrows,7)
+
+        phase[0]=0
+        def aggressive_prefetch(text,visible):
+            if phase[0]!=0:return
+            loads = re.findall(r'DECODE index=(\d+) speculative=(true|false) aggressive=(true|false)',text)
+            ids = [int(record[0]) for record in loads]
+            assert len(ids)==len(set(ids)), 'prefetch decoded an image twice'
+            if len(ids)==len(list(repeat_folder.iterdir())):
+                assert ids[:3]==[0,1,len(ids)-1], 'neighbors must load before distant images'
+                assert all(record[2]=='true' for record in loads[3:]), loads
+                target=next(identifier for identifier,name in visible.items() if name.startswith(str(repeat_folder)))
+                key(target,'q');phase[0]=1
+        exercise('aggressive prefetch loads the whole small list once',['--aggressive',repeat_folder],aggressive_prefetch,prefetch=True)
 
         saved_client={}
         phase[0]=0

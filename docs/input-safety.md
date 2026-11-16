@@ -19,10 +19,13 @@ These checks run in production builds, including ReleaseFast.
   interlace with shared Zig code. Check chunk ranges, ordering, CRCs and the exact
   decompressed size. libdeflate decompresses the pixel stream. Bound Exif offsets
   to their metadata payload and retain ICC data in the image allocation.
-- Decode ordinary 8-bit JPEG directly with libjpeg-turbo on Linux. Check the
+- Decode ordinary 8-bit JPEG with a shared Zig adapter and libjpeg-turbo. Check the
   dimensions again after reading the source into owned storage. Assemble ICC
-  segments in sequence order and apply Exif orientation. Keep ImageIO for macOS
-  JPEG and the native Linux loader for other JPEG sample formats and color models.
+  segments in sequence order and apply Exif orientation. On supported builds,
+  Zig decodes sequential Huffman streams with checked tables and bit ranges.
+  libjpeg-turbo retains inverse transforms, upsampling and error recovery.
+  Other JPEG variants use the existing library decoders. macOS retains ImageIO
+  for full-chroma, gray, progressive, restart-marker and reduced-source images.
 - Decode JPEG XL directly with libjxl on Linux. Check dimensions, integer sample
   precision, profile size and output buffer size. Join native jobs before freeing
   storage. Use the orientation stored with JPEG XL image data. Ignore a second

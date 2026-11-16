@@ -3,6 +3,19 @@
 pub const Ref = *const anyopaque;
 pub extern "c" fn CACurrentMediaTime() f64;
 pub extern "c" var NSRunLoopCommonModes: Ref;
+pub fn availableMemory() u64 {
+    const c = @import("system");
+    const host = c.mach_host_self();
+    if (host == c.MACH_PORT_NULL) return 0;
+    defer _ = c.mach_port_deallocate(c.mach_task_self(), host);
+    var stats: c.vm_statistics64_data_t = @import("std").mem.zeroes(c.vm_statistics64_data_t);
+    var count: c.mach_msg_type_number_t = c.HOST_VM_INFO64_COUNT;
+    if (c.host_statistics64(host, c.HOST_VM_INFO64, @ptrCast(&stats), &count) != c.KERN_SUCCESS) return 0;
+    const page_size = c.getpagesize();
+    if (page_size <= 0) return 0;
+    // free_count already includes speculative pages. Do not count them twice.
+    return (@as(u64, stats.free_count) + stats.inactive_count) *| @as(u64, @intCast(page_size));
+}
 pub const Point = extern struct { x: f64, y: f64 };
 pub const Size = extern struct { width: f64, height: f64 };
 pub const Rect = extern struct { origin: Point, size: Size };

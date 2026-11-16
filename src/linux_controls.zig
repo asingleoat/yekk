@@ -8,6 +8,7 @@ const view_actions = @import("view_actions.zig");
 pub const Request = struct {
     index: usize = 0,
     revision: u64 = 1,
+    selection_serial: u64 = 0,
     width: c_int = 1100,
     height: c_int = 760,
     view: core.View = .{},
@@ -72,6 +73,7 @@ pub const Controller = struct {
     }
     pub fn neighbors(self: *const Controller, request: *Request) void {
         self.snapshotNavigation(request);
+        request.selection_serial = self.selection_serial;
         if (self.count == 0) {
             request.next = null;
             request.previous = null;

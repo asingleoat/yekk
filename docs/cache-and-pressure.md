@@ -20,6 +20,12 @@ selected image, workers load its next and previous neighbors and prepare views.
 Requests from the user take priority. Selecting a neighbor during prefetch uses
 the load already in progress.
 
+`--aggressive` continues through the rest of the image list after loading the
+neighbors. It uses the OS estimate of available memory and reserves room for
+another foreground load. An image that does not fit does not stop smaller images
+from loading. There is no fixed cache-size limit. Memory pressure stops further
+prefetch for the current selection and releases inactive entries.
+
 A **cache hit** means the required data is already in memory.
 A decoded-image hit avoids another decode. An exact prepared-view hit also
 avoids rendering that viewport again. Final window-system display work remains.

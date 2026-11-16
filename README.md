@@ -36,6 +36,7 @@ zig build -Doptimize=ReleaseFast
 With no arguments, Yekk opens the current directory. A file argument opens only
 that image. Use `--browse FILE` to include other images from the same directory.
 Use `-r` to include subdirectories. Use `--help` to list options.
+Use `--aggressive` to preload the rest of the image list while RAM is available.
 
 ## Controls
 

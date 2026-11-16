@@ -12,6 +12,7 @@ const hooks = @import("hooks.zig");
 const commands = @import("commands.zig");
 const actions = @import("actions.zig");
 const controls = @import("linux_controls.zig");
+const cache = @import("cache.zig");
 const input = @import("session_input.zig");
 const menu = @import("linux_menu.zig");
 
@@ -147,7 +148,7 @@ const Image = struct {
 };
 
 const Stamp = @import("source").Stamp;
-const Entry = struct { image: ?*Image = null, failed: bool = false, reload: bool = false, refreshing: bool = false, version: u64 = 0, stamp: ?Stamp = null };
+const Entry = struct { image: ?*Image = null, failed: bool = false, reload: bool = false, refreshing: bool = false, version: u64 = 0, stamp: ?Stamp = null, prefetch_estimate: ?u64 = null };
 const Request = controls.Request;
 const Result = struct { requested_at: f64 = 0, pixels: native.Frame = native.Frame{}, revision: u64 = 0, image_version: u64 = 0, index: usize = 0, width: u32 = 0, height: u32 = 0, view: core.View = .{}, stamp: ?Stamp = null, link_stamp: ?Stamp = null };
 // Single UI producer / render-worker consumer. A full queue leaves ownership
@@ -224,6 +225,7 @@ const Config = struct {
     recovery_test: bool = false,
     native_recovery_test: bool = false,
     prefetch: bool = true,
+    aggressive: bool = false,
     stress: usize = 0,
     workers: c_int = 0,
     snapshot: ?[:0]const u8 = null,
@@ -235,6 +237,8 @@ const State = struct {
     entries: [catalog.capacity]Entry = @splat(.{}),
     lock: Mutex = .{},
     stop: std.atomic.Value(bool) = .init(false),
+    distant_prefetch: ?usize = null, // Protected by lock; cancellation is atomic.
+    distant_cancel: std.atomic.Value(bool) = .init(false),
     changed: @import("platform/linux_notification.zig").Notification = .{},
     indexed: std.atomic.Value(bool) = .init(false),
     index_failed: std.atomic.Value(bool) = .init(false),
@@ -341,6 +345,7 @@ fn parse(state: *State, args: []const [*:0]const u8) !bool {
     cfg.listing = common.listing;
     cfg.draw_actions = common.draw_actions;
     cfg.draw_filename = common.draw_filename;
+    cfg.aggressive = common.aggressive;
     cfg.paused = if (common.slideshow) |slideshow| slideshow.paused else false;
     cfg.initial_zoom = common.zoom;
     state.request.view = .initial(cfg.settings.fit, common.zoom);
@@ -369,7 +374,8 @@ fn usage() void {
         "--keep-zoom-vp, --no-wrap, -D SECONDS (negative: paused), --on-last-slide POLICY,\n" ++
         "-R SECONDS, --watch, -A COMMAND, --action1..9 COMMAND, --config FILE, --keys FILE,\n" ++
         "-l metadata list, --print-filelist, --formats, --software, --decode-workers N,\n" ++
-        "--benchmark, --alloc-stats. Keys follow the shared feh action map.\n");
+        "--aggressive (preload the list), --no-prefetch, --benchmark, --alloc-stats.\n" ++
+        "Keys follow the shared feh action map.\n");
 }
 
 fn decode(path: [:0]const u8) !*Image {
@@ -518,6 +524,7 @@ fn decodeWorker(state: *State) void {
     // belongs to this worker and must be retired on every exit path.
     defer reclaim(state, std.math.maxInt(usize));
     var pressure_selection: ?usize = null;
+    var sweep: cache.PrefetchSweep = .{};
     while (!state.stop.load(.acquire)) {
         const observed = state.changed.observe();
         const request = state.getRequest();
@@ -545,6 +552,7 @@ fn decodeWorker(state: *State) void {
             if (entry.reload) {
                 entry.failed = false;
                 entry.refreshing = true;
+                entry.prefetch_estimate = null;
                 entry.reload = false;
             }
             state.lock.unlock();
@@ -560,6 +568,13 @@ fn decodeWorker(state: *State) void {
             pressure_selection = request.index;
         }
         var target: ?usize = null;
+        var aggressive = false;
+        var foreground_reserve: u64 = 0;
+        const now = runtime.now();
+        const changed_selection = if (sweep.config) |config| config.current != request.index or config.selection != request.selection_serial else true;
+        // /proc and cgroup reads belong outside the UI handoff lock.
+        const measured = if (state.config.aggressive and (changed_selection or sweep.ready(now))) native.image.availableMemory() else 0;
+        const available = if (measured == std.math.maxInt(u64)) 0 else measured;
         state.lock.lock();
         const selected = state.entries[request.index];
         if (!state.removed[request.index].load(.acquire) and !selected.failed and (selected.image == null or selected.refreshing)) target = request.index else if (selected.image != null and !selected.failed and state.config.prefetch and pressure_selection != request.index and state.presented_revision.load(.acquire) == request.revision) {
@@ -569,24 +584,90 @@ fn decodeWorker(state: *State) void {
                     break;
                 }
             };
+            if (target == null and state.config.aggressive) {
+                sweep.configure(.{ .current = request.index, .count = state.catalog.count, .selection = request.selection_serial, .version = selected.version });
+                if (sweep.ready(now)) {
+                    // File-list IDs stay fixed even when visible order changes.
+                    // Immediate visible neighbours above always have priority.
+                    foreground_reserve = selected.image.?.pixels.bytes;
+                    while (sweep.next(now, available)) |id| {
+                        const entry = &state.entries[id];
+                        if (state.removed[id].load(.acquire) or entry.failed or (entry.image != null and !entry.refreshing)) continue;
+                        if (entry.prefetch_estimate) |estimate| if (!cache.prefetchFits(available, estimate, foreground_reserve)) {
+                            sweep.blocked(estimate +| foreground_reserve);
+                            continue;
+                        };
+                        target = id;
+                        aggressive = true;
+                        break;
+                    }
+                }
+            }
         }
         state.lock.unlock();
         if (target) |id| {
             const foreground = id == request.index;
             if (!decode_lanes.acquire(foreground, &state.stop)) {
+                if (aggressive) sweep.retryCandidate();
                 _ = posix.poll(null, 0, 5);
                 continue;
             }
             defer decode_lanes.release(foreground);
             if (state.stop.load(.acquire)) continue;
+            if (aggressive) {
+                state.lock.lock();
+                if (state.request.selection_serial != request.selection_serial and state.request.index != id) {
+                    state.lock.unlock();
+                    continue;
+                }
+                state.distant_cancel.store(false, .release);
+                state.distant_prefetch = id;
+                state.lock.unlock();
+            }
+            defer if (aggressive) {
+                state.lock.lock();
+                state.distant_prefetch = null;
+                state.lock.unlock();
+            };
+            const cancel = if (aggressive) &state.distant_cancel else &state.stop;
+            if (state.stop.load(.acquire)) continue;
             const path = state.catalog.entries[id].path;
             const stamp = Stamp.read(path);
-            const image = decodeScheduled(path, memory.allocator(), .{ .speculative = !foreground, .cancel = &state.stop }) catch |first_error| retry: {
+            if (aggressive) {
+                state.lock.lock();
+                const known = state.entries[id].prefetch_estimate;
+                state.lock.unlock();
+                const estimate = known orelse estimate: {
+                    var metadata: native.Metadata = undefined;
+                    if (native.image.probeWithCancel(path.ptr, &metadata, cancel) != 0) {
+                        if (state.stop.load(.acquire)) return;
+                        if (cancel.load(.acquire)) continue;
+                        failedDecode(state, id, stamp);
+                        continue;
+                    }
+                    break :estimate cache.prefetchEstimate(metadata.width, metadata.height, @intCast(@max(0, if (stamp) |value| value.bytes else 0)));
+                };
+                state.lock.lock();
+                state.entries[id].prefetch_estimate = estimate;
+                state.lock.unlock();
+                const fresh_memory = native.image.availableMemory();
+                const headroom = if (fresh_memory == std.math.maxInt(u64)) 0 else fresh_memory;
+                if (!cache.prefetchFits(headroom, estimate, foreground_reserve)) {
+                    sweep.blocked(estimate +| foreground_reserve);
+                    continue;
+                }
+            }
+            const image = decodeScheduled(path, memory.allocator(), .{ .speculative = !foreground, .cancel = cancel }) catch |first_error| retry: {
                 if (state.stop.load(.acquire)) return;
+                if (aggressive and first_error == error.Cancelled) continue;
                 if (first_error != error.OutOfMemory) {
                     output("decode {s}: {s}; {s}\n", .{ path, @errorName(first_error), native.image.lastError() });
                     failedDecode(state, id, stamp);
                     continue;
+                }
+                if (aggressive) {
+                    pressure_selection = request.index;
+                    continue; // Do not evict history to admit background work.
                 }
                 pressure_selection = request.index;
                 state.lock.lock();
@@ -611,6 +692,7 @@ fn decodeWorker(state: *State) void {
             state.entries[id].version += 1;
             state.decode_count += 1;
             state.lock.unlock();
+            if (state.config.trace) output("DECODE index={d} speculative={any} aggressive={any}\n", .{ id, !foreground, aggressive });
             state.changed.notify();
             if (retired) |value| value.destroy();
             if (removed) image.destroy();
@@ -955,6 +1037,7 @@ const Life = struct {
     prepare: bool = false,
     software: bool = false,
     prefetch: bool = true,
+    aggressive: bool = false,
     trace: bool = false,
     workers: c_int = 0,
     catalog_options: catalog.Options = .{},
@@ -1011,6 +1094,7 @@ fn coordinate(life: *Life) void {
     var count: usize = 0;
     defer {
         state.stop.store(true, .release);
+        state.distant_cancel.store(true, .release);
         state.changed.notify();
         for (threads[0..count]) |thread| thread.join();
         native.render.free(&state.result.pixels);
@@ -1019,6 +1103,7 @@ fn coordinate(life: *Life) void {
     inline for (functions) |function| {
         threads[count] = std.Thread.spawn(.{}, function, .{state}) catch {
             state.stop.store(true, .release);
+            state.distant_cancel.store(true, .release);
             state.changed.notify();
             life.phase.store(.failed, .release);
             while (!life.quit.load(.acquire)) _ = posix.poll(null, 0, 5);
@@ -1399,6 +1484,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         state.controller.snapshotNavigation(&ui.request);
         makeOverlay(state, &ui.request, ui.notice_text);
         if (state.lock.tryLock()) {
+            if (state.distant_prefetch) |id| if (ui.request.selection_serial != state.request.selection_serial and ui.request.index != id) state.distant_cancel.store(true, .release);
             state.request = ui.request;
             state.requested_at = if (state.config.trace) runtime.now() else 0;
             if (ui.reload_pending) {
@@ -1604,6 +1690,7 @@ fn configureNativeInput(life: *Life) void {
     state.config.software = life.software;
     state.config.workers = life.workers;
     state.config.prefetch = life.prefetch;
+    state.config.aggressive = life.aggressive;
     state.config.trace = life.trace;
     state.config.smoke = life.test_opened;
     state.config.draw_filename = life.filename;
@@ -1777,6 +1864,7 @@ fn viewer(application: *Application) !void {
                         life.settings.checker = source.ui.request.checker;
                         life.software = source.state.config.software;
                         life.prefetch = source.state.config.prefetch;
+                        life.aggressive = source.state.config.aggressive;
                         life.workers = source.state.config.workers;
                         life.trace = source.state.config.trace;
                         life.nearest = source.ui.request.nearest;

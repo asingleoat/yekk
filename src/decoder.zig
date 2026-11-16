@@ -51,6 +51,21 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
         const decoded = try plan.decode(allocator, .{ .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .workers = if (limits.tiff_workers == 0) n.performanceCores() else limits.tiff_workers });
         return @import("tiff_decoder.zig").fromDecoded(decoded, space, .pnm);
     }
+    if (source_format == .jpeg and max_pixel == 0) {
+        const plan = try @import("jpeg").Plan.read(opened, limits.cancel);
+        // Keep ImageIO's hardware path for full-chroma sources. The shared
+        // sequential path wins on subsampled sources; other variants retain
+        // native decoding and their existing color-space interpretation.
+        if (@import("jpeg").fast_huffman_available and !plan.native and plan.sequential and plan.subsampled and !plan.gray) {
+            const decoded = try plan.decode(allocator, .{ .order = .argb, .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .cancel = limits.cancel });
+            const space = pngSpace(decoded) catch |err| {
+                decoded.deinit();
+                return err;
+            };
+            defer n.CFRelease(space);
+            return @import("tiff_decoder.zig").fromDecoded(decoded, space, .jpeg);
+        }
+    }
     if (source_format == .png and max_pixel == 0) {
         const plan = try @import("png").Plan.read(opened, limits.cancel);
         // Retain native colorimetry and 16-bit transparency behavior. Gray ICC
@@ -155,17 +170,28 @@ pub const Metadata = struct {
     format_len: usize = 0,
 };
 pub fn metadata(path: []const u8) Failure!Metadata {
+    return metadataWithCancel(path, null);
+}
+pub fn metadataWithCancel(path: []const u8, cancel: ?*const std.atomic.Value(bool)) Failure!Metadata {
+    if (cancel) |flag| if (flag.load(.acquire)) return error.Cancelled;
     const opened = try preflight(path, false);
     defer opened.close();
     const source_format = std.meta.activeTag(opened.format);
+    if (source_format == .jpeg) {
+        const plan = try @import("jpeg").Plan.read(opened, cancel);
+        var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height };
+        @memcpy(result.format[0..4], "jpeg");
+        result.format_len = 4;
+        return result;
+    }
     if (source_format == .png) {
-        const plan = try @import("png").Plan.read(opened, null);
+        const plan = try @import("png").Plan.read(opened, cancel);
         var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height, .format_len = 3 };
         @memcpy(result.format[0..3], "png");
         return result;
     }
     if (source_format == .pnm) {
-        const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
+        const plan = (try @import("pnm").Plan.open(path, cancel)) orelse return error.SourceChanged;
         defer plan.deinit();
         var result: Metadata = .{ .width = plan.extent.width, .height = plan.extent.height };
         const format = plan.format();

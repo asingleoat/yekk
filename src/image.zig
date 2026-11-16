@@ -1,6 +1,6 @@
 const std = @import("std");
 const n = @import("platform/native.zig");
-pub const Backend = enum { image_io, libtiff, pnm, png };
+pub const Backend = enum { image_io, libtiff, pnm, png, jpeg };
 pub const Failure = error{ OutOfMemory, UnreadableImage, InvalidDimensions, SizeOverflow, DecodeFailed, IncompleteImage, SourceChanged, Cancelled };
 // Scheduling options impose no application RAM quota.
 pub const Limits = struct { tiff_workers: usize = 0, simd_predictor: bool = true, raw_retirement: bool = false, cancel: ?*const std.atomic.Value(bool) = null };

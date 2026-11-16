@@ -58,6 +58,7 @@ pub fn build(b: *std.Build) !void {
     const tiff = try tiffModule(b, target, optimize, system, services, portable, raster, source);
     const pnm = pnmModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, tiff.import_table.get("parallel").?);
     const png = try pngModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, portable);
+    const jpeg = try jpegModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, false);
     bindings.addImport("objc-c", system);
     const root = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     root.addImport("objc", bindings);
@@ -67,6 +68,7 @@ pub fn build(b: *std.Build) !void {
     root.addImport("source", source);
     root.addImport("pnm", pnm);
     root.addImport("png", png);
+    root.addImport("jpeg", jpeg);
     root.addImport("raster", raster);
     const geometry = b.createModule(.{ .root_source_file = b.path("src/geometry.zig"), .target = target, .optimize = optimize });
     root.addImport("geometry", geometry);
@@ -103,6 +105,7 @@ pub fn build(b: *std.Build) !void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = raster })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pnm })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = png })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = jpeg })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("bmp").? })).step);
     test_step.dependOn(&run_core.step);
     test_step.dependOn(&b.addRunArtifact(catalog_tests).step);
@@ -141,6 +144,7 @@ pub fn build(b: *std.Build) !void {
     decoder_root.addImport("source", source);
     decoder_root.addImport("pnm", pnm);
     decoder_root.addImport("png", png);
+    decoder_root.addImport("jpeg", jpeg);
     linkNative(b, decoder_root, sdk);
     const decoder_tests = b.addTest(.{ .root_module = decoder_root });
     test_step.dependOn(&b.addRunArtifact(decoder_tests).step);
@@ -154,6 +158,7 @@ pub fn build(b: *std.Build) !void {
     presentation_root.addImport("source", source);
     presentation_root.addImport("pnm", pnm);
     presentation_root.addImport("png", png);
+    presentation_root.addImport("jpeg", jpeg);
     const presentation_options = b.addOptions();
     presentation_options.addOption(bool, "gpu", b.option(bool, "test-gpu", "Also verify Core Image GPU color/sampling on this machine") orelse false);
     presentation_root.addOptions("test_options", presentation_options);
@@ -171,6 +176,7 @@ pub fn build(b: *std.Build) !void {
     bench_root.addImport("source", source);
     bench_root.addImport("pnm", pnm);
     bench_root.addImport("png", png);
+    bench_root.addImport("jpeg", jpeg);
     bench_root.addOptions("build_options", runtime_options);
     bench_root.addImport("objc", bindings);
     bench_root.addLibraryPath(.{ .cwd_relative = tiff_path });
@@ -248,15 +254,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     native.addImport("source", source);
     native.addImport("pnm", pnm);
     native.addImport("png", png);
-    const jpeg = b.createModule(.{ .root_source_file = b.path("src/jpeg.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    jpeg.addImport("source", source);
-    jpeg.addImport("raster", raster);
-    jpeg.addImport("pixel_storage", tiff.import_table.get("pixel_storage").?);
-    const jpeg_bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/jpeg-bindings.h"), .target = target, .optimize = optimize });
-    var jpeg_includes = std.mem.tokenizeAny(u8, b.run(&.{ "pkg-config", "--cflags-only-I", "libturbojpeg" }), " \t\r\n");
-    while (jpeg_includes.next()) |flag| jpeg_bindings.addSystemIncludePath(.{ .cwd_relative = flag[2..] });
-    jpeg.addImport("jpeg_bindings", jpeg_bindings.createModule());
-    try linkLinuxLibraries(b, jpeg, portable, b.run(if (portable) &.{ "pkg-config", "--static", "--libs-only-L", "--libs-only-l", "libturbojpeg" } else &.{ "pkg-config", "--libs-only-L", "--libs-only-l", "libturbojpeg" }));
+    const jpeg = try jpegModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, portable);
     native.addImport("jpeg", jpeg);
     const runtime_module = runtime_options.createModule();
     native.addImport("build_options", runtime_module);
@@ -463,4 +461,31 @@ fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }
     module.addImport("png_bindings", bindings.createModule());
     return module;
+}
+
+fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, source: *std.Build.Module, raster: *std.Build.Module, storage: *std.Build.Module, portable: bool) !*std.Build.Module {
+    const jpeg = b.createModule(.{ .root_source_file = b.path("src/jpeg.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    jpeg.addImport("source", source);
+    jpeg.addImport("raster", raster);
+    jpeg.addImport("pixel_storage", storage);
+    const jpeg_bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/jpeg-bindings.h"), .target = target, .optimize = optimize });
+    if (target.result.os.tag == .macos) {
+        const include = b.graph.environ_map.get("YEKK_JPEG_INCLUDE") orelse return error.EnterNixDevelopmentShell;
+        jpeg_bindings.addSystemIncludePath(.{ .cwd_relative = include });
+        const sdk = b.graph.environ_map.get("SDKROOT") orelse return error.EnterNixDevelopmentShell;
+        jpeg_bindings.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    } else {
+        var includes = std.mem.tokenizeAny(u8, b.run(&.{ "pkg-config", "--cflags-only-I", "libturbojpeg" }), " \t\r\n");
+        while (includes.next()) |flag| jpeg_bindings.addSystemIncludePath(.{ .cwd_relative = flag[2..] });
+    }
+    jpeg.addImport("jpeg_bindings", jpeg_bindings.createModule());
+    if (target.result.os.tag == .macos) {
+        const library = b.graph.environ_map.get("YEKK_JPEG_LIB") orelse return error.EnterNixDevelopmentShell;
+        jpeg.addLibraryPath(.{ .cwd_relative = library });
+        jpeg.addRPath(.{ .cwd_relative = library });
+        jpeg.linkSystemLibrary("turbojpeg", .{ .use_pkg_config = .no });
+    } else {
+        try linkLinuxLibraries(b, jpeg, portable, b.run(if (portable) &.{ "pkg-config", "--static", "--libs-only-L", "--libs-only-l", "libturbojpeg" } else &.{ "pkg-config", "--libs-only-L", "--libs-only-l", "libturbojpeg" }));
+    }
+    return jpeg;
 }

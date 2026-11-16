@@ -116,6 +116,16 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
     }
     const no_cache = options.no_cache;
     if (std.mem.eql(u8, mode, "read")) return rawRead(argv[2], no_cache);
+    if (std.mem.eql(u8, mode, "load")) {
+        var counted = std.testing.FailingAllocator.init(std.heap.c_allocator, .{});
+        const started = n.now();
+        const image = try decoder.loadWithLimits(std.mem.span(argv[2]), 0, counted.allocator(), .{ .raw_retirement = true, .tiff_workers = options.workers });
+        const elapsed = (n.now() - started) * 1000;
+        image.destroy();
+        if (counted.alloc_index != 1 or counted.allocated_bytes != counted.freed_bytes) return error.AllocationInvariant;
+        output("{{\"mode\":\"load\",\"wall_ms\":{d:.6},\"allocations\":{d}}}\n", .{ elapsed, counted.alloc_index });
+        return;
+    }
     if (std.mem.eql(u8, mode, "verify")) {
         var counted = std.testing.FailingAllocator.init(std.heap.c_allocator, .{});
         var first: tiff.Timings = .{};

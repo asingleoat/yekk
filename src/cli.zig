@@ -10,6 +10,7 @@ pub const Slideshow = struct { seconds: f64, paused: bool };
 pub const Options = struct {
     config: ?[:0]const u8 = null,
     decode_workers: ?usize = null,
+    aggressive: bool = false,
     allocation_stats: bool = false,
     no_wrap: bool = false,
     geometry: ?@import("geometry").Geometry = null,
@@ -47,7 +48,9 @@ pub const Options = struct {
     pub fn parse(self: *Options, item: options.Item, listing: *catalog.Options) !bool {
         const name = item.name;
         const value = item.value orelse "";
-        if (std.mem.eql(u8, name, "decode-workers")) {
+        if (std.mem.eql(u8, name, "aggressive")) {
+            self.aggressive = true;
+        } else if (std.mem.eql(u8, name, "decode-workers")) {
             const workers = try std.fmt.parseInt(usize, value, 10);
             self.decode_workers = workers;
         } else if (std.mem.eql(u8, name, "geometry")) {

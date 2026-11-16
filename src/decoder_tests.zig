@@ -85,6 +85,41 @@ test "shared PNG providers preserve 16-bit pixels, orientation and a single allo
     try std.testing.expectEqual(decoder.Backend.image_io, native.backend);
 }
 
+test "shared JPEG providers preserve orientation, color tags and a single allocation" {
+    if (!@import("jpeg").fast_huffman_available) return error.SkipZigTest;
+    inline for (.{ "jpeg-sequential-orientation1.jpg", "jpeg-sequential-orientation6.jpg", "jpeg-profile-sequential-srgb.jpg" }) |name| {
+        var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const image = try decoder.loadWithAllocator("tests/fixtures/" ++ name, 0, counted.allocator());
+        defer image.destroy();
+        try std.testing.expectEqual(decoder.Backend.jpeg, image.backend);
+        try std.testing.expectEqual(@as(usize, 1), counted.alloc_index);
+        const file = try @import("source").open("tests/fixtures/" ++ name, true);
+        defer file.close();
+        const plan = try @import("jpeg").Plan.read(file, null);
+        const reference = try plan.decode(std.testing.allocator, .{ .fast_huffman = false });
+        defer reference.deinit();
+        try std.testing.expectEqual(reference.width, image.width);
+        try std.testing.expectEqual(reference.height, image.height);
+        const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB).?;
+        defer n.CFRelease(space);
+        var ours: [4096]u8 = @splat(0);
+        const count = @as(usize, image.width) * image.height * 4;
+        const context = n.CGBitmapContextCreate(&ours, image.width, image.height, 8, @as(usize, image.width) * 4, space, 0x4001).?;
+        defer n.CFRelease(context);
+        const rect = n.rect(0, 0, @floatFromInt(image.width), @floatFromInt(image.height));
+        n.CGContextDrawImage(context, rect, image.native);
+        // Compare the displayed pixels with the stock JPEG decoder. ImageIO
+        // uses different chroma interpolation, most visibly on tiny images.
+        for (ours[0..count], reference.pixels) |a, b| try std.testing.expect(@abs(@as(i16, a) - @as(i16, b)) <= 1);
+    }
+    const gray_profile = try decoder.load("tests/fixtures/jpeg-profile-gray.jpg", 0);
+    defer gray_profile.destroy();
+    try std.testing.expectEqual(decoder.Backend.image_io, gray_profile.backend);
+    const gray = try decoder.load("tests/fixtures/jpeg-gray.jpg", 0);
+    defer gray.destroy();
+    try std.testing.expectEqual(decoder.Backend.image_io, gray.backend);
+}
+
 test "shared PNG samples match ImageIO in an unscaled sRGB bitmap" {
     inline for (.{ "png-0-1-0.png", "png-0-8-0.png", "png-0-16-0-trns.png", "png-2-8-0.png", "png-2-16-0-trns.png", "png-4-16-0.png", "png-6-16-0.png", "png-profile-srgb.png" }) |name| {
         const owned = try decoder.load("tests/fixtures/" ++ name, 0);

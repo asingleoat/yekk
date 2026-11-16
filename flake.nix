@@ -53,7 +53,7 @@
           default = yekk;
           yekk = pkgs.stdenvNoCC.mkDerivation {
             pname = "yekk";
-            version = "0.2.2";
+            version = "0.2.3";
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
@@ -63,11 +63,13 @@
               ];
             };
             nativeBuildInputs = [ (zigFor system) ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.pkg-config pkgs.makeWrapper pkgs.desktop-file-utils ];
-            buildInputs = [ pkgs.libtiff pkgs.libdeflate pkgs.zlib ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
+            buildInputs = [ pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
             YEKK_TIFF_LIB = "${pkgs.lib.getLib pkgs.libtiff}/lib";
             YEKK_TIFF_INCLUDE = "${pkgs.lib.getDev pkgs.libtiff}/include";
             YEKK_DEFLATE_INCLUDE = "${pkgs.lib.getDev pkgs.libdeflate}/include";
             YEKK_DEFLATE_LIB = "${pkgs.lib.getLib pkgs.libdeflate}/lib";
+            YEKK_JPEG_INCLUDE = "${pkgs.lib.getDev pkgs.libjpeg_turbo}/include";
+            YEKK_JPEG_LIB = "${pkgs.lib.getLib pkgs.libjpeg_turbo}/lib";
             YEKK_ZLIB_INCLUDE = "${pkgs.lib.getDev pkgs.zlib}/include";
             YEKK_ZLIB_LIB = "${pkgs.lib.getLib pkgs.zlib}/lib";
             SDKROOT = if pkgs.stdenv.hostPlatform.isDarwin then "${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" else "";
@@ -146,7 +148,7 @@
           linux-release = let
             libraries = import ./packaging/linux-libraries.nix { inherit pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
             binary = self.packages.${system}.linux-release-unwrapped;
-          in pkgs.runCommand "yekk-linux-release-0.2.2" {
+          in pkgs.runCommand "yekk-linux-release-0.2.3" {
             nativeBuildInputs = [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
             meta.platforms = pkgs.lib.platforms.linux;
           } ''
@@ -154,13 +156,13 @@
                 --output "$out" --font ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf \
                 --mime ${pkgs.shared-mime-info}/share/mime \
                 --source ${binary.src} --dependency-sources ${libraries.librarySources} \
-                --dependency-metadata ${libraries.metadata} --version 0.2.2
+                --dependency-metadata ${libraries.metadata} --version 0.2.3
           '';
         });
       devShells = eachSystem (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {
-            packages = [ (zigFor system) pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
+            packages = [ (zigFor system) pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.libjxl pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
             YEKK_TEST_PORTAL = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal}" else "";
             YEKK_TEST_PORTAL_GTK = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal-gtk}" else "";
             YEKK_LINUX_LOADER = if pkgs.stdenv.hostPlatform.isLinux then pkgs.stdenv.cc.bintools.dynamicLinker else "";
@@ -174,6 +176,8 @@
             YEKK_TIFF_INCLUDE = "${pkgs.lib.getDev pkgs.libtiff}/include";
             YEKK_DEFLATE_INCLUDE = "${pkgs.lib.getDev pkgs.libdeflate}/include";
             YEKK_DEFLATE_LIB = "${pkgs.lib.getLib pkgs.libdeflate}/lib";
+            YEKK_JPEG_INCLUDE = "${pkgs.lib.getDev pkgs.libjpeg_turbo}/include";
+            YEKK_JPEG_LIB = "${pkgs.lib.getLib pkgs.libjpeg_turbo}/lib";
             YEKK_ZLIB_INCLUDE = "${pkgs.lib.getDev pkgs.zlib}/include";
             YEKK_ZLIB_LIB = "${pkgs.lib.getLib pkgs.zlib}/lib";
             shellHook = ''

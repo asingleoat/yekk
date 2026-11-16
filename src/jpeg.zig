@@ -1,12 +1,16 @@
 //! Direct libjpeg-turbo adapter. Metadata, storage and orientation are shared
-//! Zig code; the native library retains entropy, IDCT and upsampling work.
+//! Zig code; the native library retains IDCT and upsampling work.
 const std = @import("std");
 const c = @import("jpeg_bindings");
+const entropy = @import("jpeg_entropy.zig");
+pub const fast_huffman_available = entropy.supported_abi;
 const source = @import("source");
 const Extent = @import("raster").Extent;
 pub const Decoded = @import("pixel_storage").Decoded;
 const Failure = source.Error || error{ OutOfMemory, SourceChanged, Cancelled };
 pub const Options = struct {
+    order: @import("pixel_storage").Order = .rgba,
+    fast_huffman: bool = true,
     prefix_bytes: usize = 0,
     raw_retirement: bool = false,
     cancel: ?*const std.atomic.Value(bool) = null,
@@ -17,6 +21,8 @@ pub const Plan = struct {
     orientation: source.Orientation = .identity,
     gray: bool,
     native: bool,
+    sequential: bool = false,
+    subsampled: bool = false,
     profile_parts: [255]?source.Range = @splat(null),
     profile_count: usize = 0,
     profile_bytes: usize = 0,
@@ -29,6 +35,9 @@ pub const Plan = struct {
         var dimensions: ?Extent = null;
         var gray = false;
         var native = false;
+        var sequential = false;
+        var subsampled = false;
+        var restart = false;
         var orientation: source.Orientation = .identity;
         var saw_exif = false;
         var parts: [255]?source.Range = @splat(null);
@@ -54,9 +63,13 @@ pub const Plan = struct {
             const payload: source.Range = .{ .file = file, .offset = at + 2, .length = size - 2 };
             if (code == 0xda) {
                 const stored = dimensions orelse return error.DecodeFailed;
+                var count: [1]u8 = undefined;
+                if (payload.length < 1) return error.DecodeFailed;
+                try readExact(file, &count, payload.offset);
+                sequential = sequential and count[0] == (if (gray) @as(u8, 1) else 3);
                 for (parts[0..part_count]) |part| if (part == null) return error.DecodeFailed;
                 if (!file.unchanged()) return error.SourceChanged;
-                return .{ .file = file, .stored = stored, .orientation = orientation, .gray = gray, .native = native, .profile_parts = parts, .profile_count = part_count, .profile_bytes = profile_bytes };
+                return .{ .file = file, .stored = stored, .orientation = orientation, .gray = gray, .native = native, .sequential = sequential and !restart, .subsampled = subsampled, .profile_parts = parts, .profile_count = part_count, .profile_bytes = profile_bytes };
             }
             if ((code >= 0xc0 and code <= 0xcf) and code != 0xc4 and code != 0xc8 and code != 0xcc) {
                 if (dimensions != null or payload.length < 6) return error.DecodeFailed;
@@ -66,7 +79,18 @@ pub const Plan = struct {
                 if (payload.length != 6 + @as(usize, sof[5]) * 3) return error.DecodeFailed;
                 gray = sof[5] == 1;
                 native = (sof[0] != 8 or (sof[5] != 1 and sof[5] != 3) or (code != 0xc0 and code != 0xc1 and code != 0xc2));
+                sequential = (code == 0xc0 or code == 0xc1) and sof[0] == 8;
+                if (sof[5] == 3) {
+                    var components: [9]u8 = undefined;
+                    try readExact(file, &components, payload.offset + 6);
+                    subsampled = components[1] != components[4] or components[1] != components[7];
+                }
                 _ = try dimensions.?.bytes(4, 1);
+            } else if (code == 0xdd) {
+                if (payload.length != 2) return error.DecodeFailed;
+                var interval: [2]u8 = undefined;
+                try readExact(file, &interval, payload.offset);
+                restart = std.mem.readInt(u16, &interval, .big) != 0;
             } else if (code == 0xe1 and payload.length >= 6) {
                 var prefix: [6]u8 = undefined;
                 try readExact(file, &prefix, payload.offset);
@@ -102,7 +126,7 @@ pub const Plan = struct {
         const end = try add(prefix, try self.stored.bytes(4, 1));
         const profile_end = try add(end, self.profile_bytes);
         const input_end = try add(profile_end, @intCast(self.file.stamp.bytes));
-        const total = try add(input_end, if (self.orientation == .identity) 0 else try self.stored.bytes(4, 1));
+        const total = try add(try add(input_end, entropy.padding), if (self.orientation == .identity) 0 else try self.stored.bytes(4, 1));
         return .{ .prefix = prefix, .end = end, .profile_end = profile_end, .input_end = input_end, .total = total };
     }
     pub fn storageBytes(self: Plan, options: Options) Failure!usize {
@@ -116,11 +140,11 @@ pub const Plan = struct {
         defer c.tj3Destroy(decoder);
         try check(c.tj3Set(decoder, c.TJPARAM_STOPONWARNING, 1));
         // Metadata lives in our slab. Do not retain a duplicate native copy.
-        try check(c.tj3Set(decoder, c.TJPARAM_SAVEMARKERS, 0));
+        if (@hasDecl(c, "TJPARAM_SAVEMARKERS")) try check(c.tj3Set(decoder, c.TJPARAM_SAVEMARKERS, 0));
         const pointer = allocator.rawAlloc(storage.total, .fromByteUnits(64), @returnAddress()) orelse return error.OutOfMemory;
         const slab = @as([*]align(64) u8, @alignCast(pointer))[0..storage.total];
         const size = self.extent();
-        const decoded: Decoded = .{ .allocator = allocator, .slab = slab, .pixels = slab[storage.prefix..storage.end], .profile = slab[storage.end..storage.profile_end], .width = size.width, .height = size.height, .row_bytes = @as(usize, size.width) * 4, .bits_per_component = 8, .raw_retirement = options.raw_retirement };
+        const decoded: Decoded = .{ .order = options.order, .allocator = allocator, .slab = slab, .pixels = slab[storage.prefix..storage.end], .profile = slab[storage.end..storage.profile_end], .width = size.width, .height = size.height, .row_bytes = @as(usize, size.width) * 4, .bits_per_component = 8, .raw_retirement = options.raw_retirement };
         errdefer decoded.deinit();
         const input = slab[storage.profile_end..storage.input_end];
         // Read in cancellable blocks, directly into the retained slab scratch.
@@ -149,8 +173,8 @@ pub const Plan = struct {
             if (profile.len < 132 or std.mem.readInt(u32, profile[0..4], .big) != profile.len or !std.mem.eql(u8, profile[36..40], "acsp") or !std.mem.eql(u8, profile[16..20], if (self.gray) "GRAY" else "RGB ")) return error.DecodeFailed;
         }
         try cancelled(options.cancel);
-        const pixels = if (self.orientation == .identity) decoded.pixels else slab[storage.input_end..];
-        try check(c.tj3Decompress8(decoder, input.ptr, input.len, pixels.ptr, 0, c.TJPF_RGBA));
+        const pixels = if (self.orientation == .identity) decoded.pixels else slab[storage.input_end + entropy.padding ..];
+        _ = try entropy.decode(decoder, slab[storage.profile_end .. storage.input_end + entropy.padding], input.len, pixels, self.stored.width, self.stored.height, if (options.order == .argb) c.TJPF_ARGB else c.TJPF_RGBA, options.cancel, options.fast_huffman);
         try cancelled(options.cancel);
         if (self.orientation != .identity) self.orient(pixels, decoded, options.cancel) catch return error.Cancelled;
         if (!self.file.unchanged()) return error.SourceChanged;
@@ -242,4 +266,7 @@ test "JPEG retains out-of-order ICC segments and expands grayscale without a nat
         decoded.deinit();
         try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
     }
+}
+test {
+    _ = @import("jpeg_entropy.zig");
 }

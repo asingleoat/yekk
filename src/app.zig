@@ -38,12 +38,19 @@ const Cached = struct {
     mirror_x: bool = false,
     mirror_y: bool = false,
     presentation_bytes: usize = 0,
+    prefetch_estimate: ?struct { version: u64, bytes: u64 } = null,
 };
+const DecodeIntent = enum { foreground, neighbor, aggressive };
 const Job = struct {
     stamp: Stamp = .{},
     owner: *State = undefined,
     busy: bool = false,
     prefetch: bool = false,
+    aggressive: bool = false,
+    foreground_reserve: u64 = 0,
+    known_estimate: ?u64 = null,
+    selection: u64 = 0,
+    admission: union(enum) { not_needed, admitted: u64, deferred: u64 } = .not_needed,
     id: usize = 0,
     version: u64 = 0,
     path: [:0]const u8 = "",
@@ -191,6 +198,8 @@ const State = struct {
     geometry: core.View = .{},
     render_jobs: [2]RenderJob = @splat(.{}),
     prefetch_generation: u64 = 0,
+    prefetch_sweep: cache.PrefetchSweep = .{},
+    aggressive_paused: ?u64 = null,
     prepare_failures: [2]?PrepareFailure = @splat(null),
     render_wanted: ?Prepared = null,
     render_presented: ?Prepared = null,
@@ -812,7 +821,8 @@ fn inflight(id: usize) ?*Job {
     for (&s.jobs) |*job| if (job.busy and job.id == id and job.version == s.cached[id].version) return job;
     return null;
 }
-fn start(job: *Job, id: usize, prefetch: bool) bool {
+fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
+    const prefetch = intent != .foreground;
     if (prefetch and s.cli.stress_cycles > 0 and s.cli.stress_no_prefetch) return false;
     if (control.memory_recovering) return false;
     if (s.release_count >= s.release_queue.len - retirement_headroom) return false;
@@ -834,6 +844,16 @@ fn start(job: *Job, id: usize, prefetch: bool) bool {
         }
     }
     job.* = .{ .owner = s, .busy = true, .prefetch = prefetch, .id = id, .version = s.cached[id].version, .path = path, .workers = workers, .limits = s.limits, .edge = edge };
+    job.aggressive = intent == .aggressive;
+    if (job.aggressive) {
+        job.selection = s.selection_revision;
+        for (&root.sessions, control.active) |*session, active| if (active) {
+            if (session.current) |image| job.foreground_reserve = @max(job.foreground_reserve, image.accountedBytes());
+        };
+        if (s.cached[id].prefetch_estimate) |estimate| if (estimate.version == job.version) {
+            job.known_estimate = estimate.bytes;
+        };
+    }
     job.limits.tiff_workers = workers;
     job.limits.raw_retirement = !memory.debug_enabled;
     job.limits.cancel = &s.cancel;
@@ -885,7 +905,7 @@ fn pump() void {
                 }
             } else {
                 for (&s.jobs) |*job| if (!job.busy) {
-                    _ = start(job, id, false);
+                    _ = start(job, id, .foreground);
                     break;
                 };
             }
@@ -902,11 +922,12 @@ fn pump() void {
                     const target = &s.cached[other];
                     if ((target.image != null and target.image_version == target.version) or target.failed_version == target.version or inflight(other) != null) continue;
                     for (&s.jobs) |*job| if (!job.busy) {
-                        _ = start(job, other, true);
+                        _ = start(job, other, .neighbor);
                         break;
                     };
                     break;
                 };
+                aggressivePrefetch(id);
             }
         }
     }
@@ -914,7 +935,49 @@ fn pump() void {
     renderPrefetchPump();
     releasePump();
     status();
+    configureTimer();
     if (s.cli.smoke or s.cli.benchmark or s.cli.watch_test or s.cli.hook_test) automation();
+}
+fn aggressivePrefetch(selected: usize) void {
+    if (!s.cli.aggressive or s.aggressive_paused == s.selection_revision or !control.allow_prefetch or control.memory_recovering) return;
+    if (!cache.admitDecode(control.active_decodes, control.speculative_decodes, false)) return;
+    s.prefetch_sweep.configure(.{ .current = position(selected) orelse return, .count = s.entries.len, .selection = s.selection_revision, .version = s.cached[selected].version });
+    const now = n.now();
+    if (!s.prefetch_sweep.ready(now)) return;
+    const available = n.availableMemory();
+    var reserve: u64 = 0;
+    for (&root.sessions, control.active) |*session, active| if (active) {
+        if (session.current) |image| reserve = @max(reserve, image.accountedBytes());
+    };
+    while (s.prefetch_sweep.next(now, available)) |index| {
+        const id = s.entries[index].id;
+        const target = &s.cached[id];
+        if ((target.image != null and target.image_version == target.version) or target.failed_version == target.version or inflight(id) != null) continue;
+        if (target.prefetch_estimate) |estimate| if (estimate.version == target.version and !cache.prefetchFits(available, estimate.bytes, reserve)) {
+            s.prefetch_sweep.blocked(estimate.bytes +| reserve);
+            continue;
+        };
+        for (&s.jobs) |*job| if (!job.busy) {
+            if (!start(job, id, .aggressive)) s.prefetch_sweep.retryCandidate();
+            return;
+        };
+        s.prefetch_sweep.retryCandidate();
+        return;
+    }
+}
+fn loadJob(job: *Job, before: Stamp) decoder.Failure!?*Image {
+    if (job.aggressive) {
+        const estimate = job.known_estimate orelse estimate: {
+            const metadata = try decoder.metadataWithCancel(job.path, job.limits.cancel);
+            break :estimate cache.prefetchEstimate(metadata.width, metadata.height, @intCast(@max(0, before.bytes)));
+        };
+        if (!cache.prefetchFits(n.availableMemory(), estimate, job.foreground_reserve)) {
+            job.admission = .{ .deferred = estimate };
+            return null;
+        }
+        job.admission = .{ .admitted = estimate };
+    }
+    return try decoder.loadWithLimits(job.path, job.edge, memory.allocator(), job.limits);
 }
 fn decodeWorker(context: ?*anyopaque) callconv(.c) void {
     const pool = objc.AutoreleasePool.init();
@@ -923,7 +986,7 @@ fn decodeWorker(context: ?*anyopaque) callconv(.c) void {
     s = job.owner;
     const started = if (s.cli.benchmark) n.now() else 0;
     const before = (Stamp.read(job.path) orelse Stamp{});
-    job.image = decoder.loadWithLimits(job.path, job.edge, memory.allocator(), job.limits) catch |err| result: {
+    job.image = loadJob(job, before) catch |err| result: {
         job.failure = err;
         break :result null;
     };
@@ -944,6 +1007,13 @@ fn decoded(context: ?*anyopaque) callconv(.c) void {
     s = job.owner;
     if (s.cli.benchmark) s.worker_decode_ms += job.elapsed_ms;
     const r = &s.cached[job.id];
+    if (r.version == job.version) switch (job.admission) {
+        .not_needed => {},
+        .admitted, .deferred => |bytes| r.prefetch_estimate = .{ .version = job.version, .bytes = bytes },
+    };
+    if (job.admission == .deferred) {
+        if (s.prefetch_sweep.config) |config| if (config.selection == job.selection) s.prefetch_sweep.blocked(job.admission.deferred +| job.foreground_reserve);
+    }
     if (job.image) |image| {
         if (!s.closing and r.version == job.version and (!job.prefetch or s.pressure == .normal)) {
             if (r.image) |old| {
@@ -961,7 +1031,10 @@ fn decoded(context: ?*anyopaque) callconv(.c) void {
             s.resident_bytes += image.accountedBytes();
             touch(job.id);
         } else std.debug.assert(enqueueRelease(image));
-    } else if (!s.closing and r.version == job.version) {
+    } else if (job.aggressive and job.prefetch and isMemoryFailure(job.failure)) {
+        // Background filling must not evict useful history to force a new load.
+        s.aggressive_paused = s.selection_revision;
+    } else if (job.admission != .deferred and !s.closing and r.version == job.version) {
         r.failure = job.failure;
         r.failed_version = job.version;
         if (isMemoryFailure(job.failure)) s.memory_failures += 1;
@@ -1013,6 +1086,7 @@ fn beginMemoryRecovery(id: usize) void {
     // Reclaim inactive history across windows in existing bounded worker batches.
     for (&root.sessions, control.active) |*session, active| if (active) {
         session.clear_context_requested = true;
+        session.aggressive_paused = session.selection_revision;
         session.prefetch_generation +%= 1;
     };
 }
@@ -1053,6 +1127,7 @@ fn setPressure(pressure: cache.Pressure) void {
         }
     };
     s.pressure = pressure;
+    if (pressure != .normal) s.aggressive_paused = s.selection_revision;
     if (pressure != .normal) s.clear_context_requested = true;
     pump();
 }
@@ -1271,7 +1346,7 @@ fn updateOverlay() void {
 }
 
 fn configureTimer() void {
-    const needed = s.settings.watch or s.slideshow_running or s.cli.benchmark;
+    const needed = s.settings.watch or s.slideshow_running or s.cli.benchmark or (s.cli.aggressive and s.prefetch_sweep.phase == .waiting and s.aggressive_paused != s.selection_revision);
     if (needed and s.timer.value == null) {
         s.timer = cls("NSTimer").msgSend(O, "scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:", .{ @as(f64, if (s.cli.benchmark) 1.0 / 120.0 else 0.25), s.delegate, objc.sel("tick:"), nil, true });
         s.timer.msgSend(void, "setTolerance:", .{@as(f64, if (s.cli.benchmark) 0 else 0.05)});
@@ -1330,6 +1405,7 @@ fn tick(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
             n.dispatch_async_f(n.dispatch_get_global_queue(0x11, 0), s, watchWorker);
         }
     }
+    if (s.cli.aggressive and s.prefetch_sweep.ready(now)) pump();
 }
 fn watchWorker(context: ?*anyopaque) callconv(.c) void {
     sessionContext(context);
@@ -2770,6 +2846,7 @@ const usage =
     \\  -l, --list              --print-filelist      --formats
     \\  -h, --help              -v, --version
     \\  --decode-workers N      CPU decode budget (0: automatic)   --alloc-stats
+    \\  --aggressive            Preload the list while memory is available
     \\Yekk aliases: --fit shrink|fit|fill|width|height|actual, --shuffle,
     \\              --slideshow SECONDS, --watch, --keep-view.
     \\Keys: Space/n/Right next; Backspace/p/Left previous; Up/Down zoom;

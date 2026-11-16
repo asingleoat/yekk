@@ -42,6 +42,10 @@ pub fn lastError() [*:0]const u8 {
     return c.vips_error_buffer();
 }
 pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
+    return probeWithCancel(path, result, null);
+}
+pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const std.atomic.Value(bool)) c_int {
+    if (cancel) |flag| if (flag.load(.acquire)) return -1;
     const file = source_file.open(std.mem.span(path), false) catch return -1;
     defer file.close();
     if (std.meta.activeTag(file.format) == .jxl) {
@@ -51,14 +55,14 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
         return 0;
     }
     if (std.meta.activeTag(file.format) == .png) {
-        const plan = @import("png").Plan.read(file, null) catch return -1;
+        const plan = @import("png").Plan.read(file, cancel) catch return -1;
         const size = plan.extent();
         result.* = .{ .width = size.width, .height = size.height, .bits = if (plan.header.depth == 16) 16 else 8 };
         @memcpy(result.format[0..3], "png");
         return 0;
     }
     if (std.meta.activeTag(file.format) == .jpeg) {
-        const plan = @import("jpeg").Plan.read(file, null) catch return -1;
+        const plan = @import("jpeg").Plan.read(file, cancel) catch return -1;
         if (!plan.native) {
             const size = plan.extent();
             result.* = .{ .width = size.width, .height = size.height, .bits = 8 };
@@ -66,7 +70,7 @@ pub fn probe(path: [*:0]const u8, result: *Metadata) c_int {
             return 0;
         }
     }
-    const candidate = if (std.meta.activeTag(file.format) == .pnm) @import("pnm").Plan.open(std.mem.span(path), null) catch return -1 else null;
+    const candidate = if (std.meta.activeTag(file.format) == .pnm) @import("pnm").Plan.open(std.mem.span(path), cancel) catch return -1 else null;
     if (candidate) |plan| {
         defer plan.deinit();
         result.* = .{ .width = plan.extent.width, .height = plan.extent.height, .bits = if (plan.maximum > 255) 16 else 8 };
@@ -179,7 +183,7 @@ fn iccLinear(source: *c.VipsImage, opaque_source: bool) Error!*c.VipsImage {
 }
 // Only minimum storage admission is checked; no application RAM quota.
 var reserved: std.atomic.Value(u64) = .init(0);
-fn availableMemory() u64 {
+pub fn availableMemory() u64 {
     var available: u64 = std.math.maxInt(u64);
     const file = c.fopen("/proc/meminfo", "re");
     if (file != null) {

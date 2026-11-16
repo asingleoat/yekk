@@ -31,7 +31,8 @@ changes to external state. Platform adapters then read files, update windows or 
 | `cache.zig`, `sessions.zig`, `memory.zig` | Cache policy, window sessions and allocation counters |
 | `tiff_pixels.zig` | Shared RGB16 TIFF decoding and SIMD prediction |
 | `png.zig`, `pnm.zig` | Shared PNG and Netpbm decoding |
-| `jpeg.zig`, `jxl_pixels.zig` | Direct native JPEG and JPEG XL adapters on Linux |
+| `jpeg.zig`, `jpeg_entropy.zig` | Shared JPEG storage, metadata, Huffman decoding and libjpeg-turbo adapter |
+| `jxl_pixels.zig` | Direct libjxl adapter on Linux |
 | `pixel_storage.zig` | Owned pixel slabs and temporary-buffer reclamation |
 
 macOS uses AppKit, dispatch, ImageIO, Core Image and Core Graphics.
