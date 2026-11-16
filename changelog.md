@@ -8,6 +8,6 @@
 - `--aggressive` preloads beyond the next and previous images while RAM is
   available. User requests take priority. Memory pressure stops further prefetch
   for the current selection.
-- JPEG loading is faster for supported files. The Zig decoder produces the
-  same pixels as libjpeg-turbo and uses its error recovery. Other variants
+- JPEG loading is faster for supported files. Zig performs part of the decoding,
+  with the same pixels as libjpeg-turbo and its error recovery. Other variants
   retain their existing decoder. macOS keeps ImageIO where it is faster.

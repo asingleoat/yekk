@@ -53,17 +53,21 @@ input, pixels, ICC data and orientation buffers in one allocation. The native
 decoder does not retain another copy of Exif or ICC data. Rotated output uses
 small cache tiles.
 
-For sequential JPEG, Zig combines a Huffman symbol and its signed coefficient
-value in one lookup. Longer codes use a bounded canonical decoder. A pass removes
-byte stuffing in the owned input buffer. libjpeg-turbo retains the integer
+JPEG represents image blocks with coefficients: numbers that describe patterns
+of brightness and color. Huffman coding assigns bit patterns of different
+lengths to these numbers. In sequential JPEG, each block is encoded in one scan.
+Zig combines a Huffman code and its following value bits in one lookup.
+Longer codes use checked code tables. JPEG inserts a zero after each compressed
+data byte with value 255; Zig removes these zeros in the owned input buffer.
+libjpeg-turbo retains the integer
 inverse transform, chroma upsampling and color output. The result must match its
 stock decoder byte for byte. Progressive images and images with restart markers
 retain the stock decoder.
 
-This path uses two internal callback prefixes audited for libjpeg-turbo 3.2.0
-with its version-6b ABI. Other library builds retain their existing decoder.
-The callback executes within TurboJPEG's C error boundary; Zig does not implement
-`setjmp` or `longjmp`. The tables use worker stack storage.
+The adapter reads the initial fields of two internal C structures. Their layout
+is checked against libjpeg-turbo 3.2.0 with `JPEG_LIB_VERSION=62`. Other library
+builds retain their existing decoder. TurboJPEG catches decode errors in C and
+returns failure to Zig. The tables use worker stack storage.
 
 On macOS, only supported sequential JPEGs with chroma subsampling use the shared
 path. Chroma subsampling stores fewer color samples than brightness samples.
