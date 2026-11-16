@@ -302,6 +302,7 @@ Yekk adds these options:
 | `--keep-view` | Same as `--keep-zoom-vp`. |
 | `--watch` | Enable checks for changes to existing files. |
 | `--fit MODE` | Choose an initial sizing mode from the table below. |
+| `--aggressive` | Preload the rest of the image list while RAM is available. See [cache policy](cache-and-pressure.md). |
 
 `--browse`, `--config`, `--formats` and `--print-filelist` are also Yekk options,
 described above. Yekk's sizing modes are:
