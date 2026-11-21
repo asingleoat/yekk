@@ -61,7 +61,7 @@ let
     ];
     postFixup = "";
   });
-  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ] ++ privateMetadata;
+  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.libraw ] ++ privateMetadata;
   sourcePackages = dependencies ++ [ pkgs.glibc pkgs.stdenv.cc.cc pkgs.dejavu_fonts zig ];
   sourceInputs = lib.unique (lib.concatMap (package:
     lib.optional (package ? src && lib.isDerivation package.src) package.src

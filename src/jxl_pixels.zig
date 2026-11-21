@@ -4,7 +4,7 @@ const c = @import("jxl_bindings");
 const source = @import("source");
 const Extent = @import("raster").Extent;
 const Decoded = @import("pixel_storage").Decoded;
-const Error = source.Error || error{ OutOfMemory, UnsupportedSampleFormat, Cancelled, SourceChanged, NativeImageFailed };
+const Error = source.Error || error{ OutOfMemory, Cancelled, SourceChanged };
 pub const Header = struct {
     extent: Extent,
     bits: u8,
@@ -65,7 +65,7 @@ const Session = struct {
             c.JXL_DEC_BASIC_INFO => {
                 var value: c.JxlBasicInfo = undefined;
                 try check(c.JxlDecoderGetBasicInfo(self.decoder, &value));
-                if (value.bits_per_sample == 0 or value.bits_per_sample > 16 or value.exponent_bits_per_sample != 0 or value.alpha_bits > 16 or value.alpha_exponent_bits != 0 or (value.num_color_channels != 1 and value.num_color_channels != 3)) return error.UnsupportedSampleFormat;
+                if (value.bits_per_sample == 0 or value.bits_per_sample > 16 or value.exponent_bits_per_sample != 0 or value.alpha_bits > 16 or value.alpha_exponent_bits != 0 or (value.num_color_channels != 1 and value.num_color_channels != 3)) return error.DecodeFailed;
                 _ = try Extent.init(value.xsize, value.ysize);
                 if (value.xsize > std.math.maxInt(c_int) or value.ysize > std.math.maxInt(c_int) or value.orientation != c.JXL_ORIENT_IDENTITY) return error.InvalidDimensions;
                 info = value;
@@ -84,8 +84,8 @@ const Session = struct {
 fn check(status: c.JxlDecoderStatus) Error!void {
     if (status != c.JXL_DEC_SUCCESS) return error.DecodeFailed;
 }
-pub fn probe(file: source.Open) Error!Header {
-    var session = try Session.init(file, 1, null);
+pub fn probe(file: source.Open, cancel: ?*const std.atomic.Value(bool)) Error!Header {
+    var session = try Session.init(file, 1, cancel);
     defer session.deinit();
     const header = try session.header();
     if (!file.unchanged()) return error.SourceChanged;
@@ -94,30 +94,32 @@ pub fn probe(file: source.Open) Error!Header {
 pub const Options = struct {
     prefix_bytes: usize = 0,
     workers: usize = 1,
+    keep_gray: bool = false,
     raw_retirement: bool = false,
     cancel: ?*const std.atomic.Value(bool) = null,
 };
 pub const Result = struct { decoded: Decoded, opaque_source: bool, gray_source: bool };
-pub fn load(file: source.Open, allocator: std.mem.Allocator, options: Options, comptime reserve: anytype, comptime release: anytype) !Result {
+pub fn load(file: source.Open, allocator: std.mem.Allocator, options: Options, comptime reserve: anytype, comptime release: anytype) Error!Result {
     // Destroy the decoder and its runner before any failed output is freed.
     var owned: ?Decoded = null;
     defer if (owned) |value| value.deinit();
     var session = try Session.init(file, options.workers, options.cancel);
     defer session.deinit();
     const header = try session.header();
-    const bytes = try header.extent.bytes(4, header.bits / 8);
-    const prefix = try std.math.add(usize, options.prefix_bytes, 63) & ~@as(usize, 63);
-    const end = try std.math.add(usize, prefix, bytes);
-    const total = try std.math.add(usize, end, header.profile_bytes);
+    const channels: u32 = if (header.gray and options.keep_gray) (if (header.opaque_source) @as(u32, 1) else 2) else 4;
+    const bytes = try header.extent.bytes(channels, header.bits / 8);
+    const prefix = (std.math.add(usize, options.prefix_bytes, 63) catch return error.SizeOverflow) & ~@as(usize, 63);
+    const end = std.math.add(usize, prefix, bytes) catch return error.SizeOverflow;
+    const total = std.math.add(usize, end, header.profile_bytes) catch return error.SizeOverflow;
     if (total > std.math.maxInt(isize)) return error.SizeOverflow;
     try reserve(total);
     defer release(total);
     const pointer = allocator.rawAlloc(total, .fromByteUnits(64), @returnAddress()) orelse return error.OutOfMemory;
     const slab = @as([*]align(64) u8, @alignCast(pointer))[0..total];
-    const decoded: Decoded = .{ .allocator = allocator, .slab = slab, .pixels = slab[prefix..end], .profile = slab[end..], .width = header.extent.width, .height = header.extent.height, .row_bytes = @as(usize, header.extent.width) * 4 * (header.bits / 8), .raw_retirement = options.raw_retirement, .bits_per_component = header.bits };
+    const decoded: Decoded = .{ .allocator = allocator, .slab = slab, .pixels = slab[prefix..end], .profile = slab[end..], .width = header.extent.width, .height = header.extent.height, .row_bytes = @as(usize, header.extent.width) * channels * (header.bits / 8), .raw_retirement = options.raw_retirement, .bits_per_component = header.bits };
     owned = decoded;
     try check(c.JxlDecoderGetColorAsICCProfile(session.decoder, c.JXL_COLOR_PROFILE_TARGET_DATA, slab[end..].ptr, header.profile_bytes));
-    const format: c.JxlPixelFormat = .{ .num_channels = 4, .data_type = if (header.bits == 16) c.JXL_TYPE_UINT16 else c.JXL_TYPE_UINT8, .endianness = c.JXL_NATIVE_ENDIAN, .@"align" = 0 };
+    const format: c.JxlPixelFormat = .{ .num_channels = channels, .data_type = if (header.bits == 16) c.JXL_TYPE_UINT16 else c.JXL_TYPE_UINT8, .endianness = c.JXL_NATIVE_ENDIAN, .@"align" = 0 };
     var phase: enum { awaiting_buffer, decoding, complete } = .awaiting_buffer;
     while (true) switch (try session.next()) {
         c.JXL_DEC_NEED_IMAGE_OUT_BUFFER => {

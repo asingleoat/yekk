@@ -78,6 +78,23 @@ These paths reuse the worker queues and decoded-image cache. They do not add
 decode work to the UI thread. Production can return completed temporary-buffer
 pages to the OS while retaining decoded pixels.
 
+## JPEG XL and camera RAW
+
+libjxl reads JPEG XL in blocks and writes the first image into the cache.
+It applies the image orientation and retains integer sample precision,
+transparency and the color profile. The macOS decoder uses this path to reject
+truncated streams. ImageIO accepted truncated examples in local checks.
+
+LibRaw unpacks the sensor samples and develops them into a 16-bit sRGB image.
+Development uses camera white balance when available. It includes demosaicing,
+which estimates the missing color channels at each sensor pixel. The viewer
+caches the developed image at full resolution. On Linux, LibRaw's OpenMP
+worker count follows the viewer decode budget.
+
+Measure unpacking and development separately when comparing RAW decoders.
+Replacing the unpacker can only reduce the first cost. Use the same camera
+file, color settings and output precision when checking a faster path.
+
 ## SIMD prediction
 
 TIFF Predictor 2 stores differences between adjacent samples of the same channel.

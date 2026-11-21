@@ -31,7 +31,14 @@ pub fn exists(path: []const u8) bool {
     return files.stat(terminated.ptr, &stat) == 0 or (runtime.errno().* != c.ENOENT and runtime.errno().* != c.ENOTDIR);
 }
 
-pub const Format = union(enum) { other, tiff, pnm, png, jpeg, jxl, bmp: @import("bmp").Header };
+pub const Format = union(enum) { other, tiff, pnm, png, jpeg, jxl, raw, bmp: @import("bmp").Header };
+pub const raw_suffixes = .{ ".arw", ".sr2", ".srf", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".dng", ".orf", ".rw2", ".pef", ".srw" };
+pub fn rawCandidate(path: []const u8) bool {
+    const std = @import("std");
+    const extension = std.fs.path.extension(path);
+    inline for (raw_suffixes) |suffix| if (std.ascii.eqlIgnoreCase(extension, suffix)) return true;
+    return false;
+}
 pub const exifOrientation = @import("exif.zig").orientation;
 pub const Orientation = @import("exif.zig").Orientation;
 pub const Range = struct {
@@ -103,6 +110,7 @@ pub fn open(path: [:0]const u8, completeness: bool) Error!Open {
         if (length < 0) return error.UnreadableImage;
         format = .{ .bmp = try @import("bmp").Header.read(header[0..@intCast(length)], @intCast(stat.st_size)) };
     }
+    if ((format == .other or format == .tiff) and rawCandidate(path)) format = .raw;
     return .{ .fd = fd, .stamp = Stamp.fromStat(stat), .format = format };
 }
 

@@ -26,10 +26,15 @@ These checks run in production builds, including ReleaseFast.
   libjpeg-turbo retains inverse transforms, upsampling and error recovery.
   Other JPEG variants use the existing library decoders. macOS retains ImageIO
   for full-chroma, gray, progressive, restart-marker and reduced-source images.
-- Decode JPEG XL directly with libjxl on Linux. Check dimensions, integer sample
+- Decode JPEG XL directly with libjxl on both platforms. Check dimensions, integer sample
   precision, profile size and output buffer size. Join native jobs before freeing
   storage. Use the orientation stored with JPEG XL image data. Ignore a second
   orientation tag in Exif metadata.
+- Decode camera RAW with LibRaw from a validated regular-file descriptor.
+  Check image sizes before full development and discard results after read errors,
+  cancellation or a source change. LibRaw selects the camera format and develops
+  a full-resolution image. A supported filename extension selects this adapter
+  because many camera files share the TIFF signature.
 - Disable libvips operations marked as untrusted. Portable Linux packages omit
   ImageMagick and the libvips JPEG XL wrapper. Other image formats use ImageIO
   or enabled libvips codecs. PNG animation and non-ICC colorimetry keep the native

@@ -16,6 +16,3 @@
 #include <SDL3/SDL_system.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
-
-#include <jxl/decode.h>
-#include <jxl/thread_parallel_runner.h>

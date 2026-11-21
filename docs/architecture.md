@@ -32,7 +32,8 @@ changes to external state. Platform adapters then read files, update windows or 
 | `tiff_pixels.zig` | Shared RGB16 TIFF decoding and SIMD prediction |
 | `png.zig`, `pnm.zig` | Shared PNG and Netpbm decoding |
 | `jpeg.zig`, `jpeg_entropy.zig` | Shared JPEG storage, metadata, Huffman decoding and libjpeg-turbo adapter |
-| `jxl_pixels.zig` | Direct libjxl adapter on Linux |
+| `jxl_pixels.zig` | Shared libjxl adapter |
+| `raw_pixels.zig` | Shared LibRaw adapter for camera sensor data |
 | `pixel_storage.zig` | Owned pixel slabs and temporary-buffer reclamation |
 
 macOS uses AppKit, dispatch, ImageIO, Core Image and Core Graphics.
@@ -90,7 +91,7 @@ Worker cancellation and cleanup finish before its window slot becomes available 
 Supported source pixels keep 8/16-bit precision and ICC color profiles.
 An ICC profile describes how to interpret the image's color values.
 The shared RGB16 TIFF decoder uses libtiff. Shared Zig code decodes PBM, PGM
-and PPM. Linux uses SDL for BMP and libjxl for JPEG XL. Other variants use
+and PPM. Both platforms use libjxl for JPEG XL and LibRaw for camera RAW. Linux uses SDL for BMP. Other variants use
 ImageIO on macOS or enabled libvips codecs on Linux. See [image input checks](input-safety.md).
 
 Display output is standard dynamic range (SDR). Floating-point calculations

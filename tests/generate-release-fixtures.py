@@ -127,3 +127,51 @@ if a.cjxl:
     output = fixtures / 'jxl-orientation6.jxl'
     subprocess.run([str(a.cjxl), str(fixtures / 'orientation6.jpg'), str(output)], check=True)
     subprocess.run([str(a.djxl), str(output), str(fixtures / 'jxl-orientation6-reference.ppm')], check=True)
+
+# Small uncompressed RGGB DNG. Store the sensor samples in a TIFF strip.
+# Orientation 6 exercises the rotation performed by the RAW processor.
+width, height = 128, 96
+samples = struct.pack('<' + 'H' * (width * height), *(
+    256 + 64 * x + 32 * y + (500 if x % 2 == y % 2 else 0)
+    for y in range(height) for x in range(width)
+))
+
+def dng_entry(tag, typ, count, data):
+    return tag, typ, count, data
+
+def short(tag, value):
+    return dng_entry(tag, 3, 1, struct.pack('<H', value))
+
+def long(tag, value):
+    return dng_entry(tag, 4, 1, struct.pack('<I', value))
+
+camera = b'Yekk Bayer Fixture\0'
+entries = [
+    long(256, width), long(257, height), short(258, 16), short(259, 1),
+    short(262, 32803), long(273, 0), short(274, 6), short(277, 1),
+    long(278, height), long(279, len(samples)), short(284, 1),
+    dng_entry(33421, 3, 2, struct.pack('<HH', 2, 2)),
+    dng_entry(33422, 1, 4, bytes([0, 1, 1, 2])),
+    dng_entry(50706, 1, 4, bytes([1, 4, 0, 0])),
+    dng_entry(50707, 1, 4, bytes([1, 1, 0, 0])),
+    dng_entry(50708, 2, len(camera), camera),
+    long(50714, 256), long(50717, 16383),
+    dng_entry(50721, 10, 9, b''.join(struct.pack('<ii', sample, 10000) for sample in [
+        4361, 3851, 1431, 2225, 7169, 606, 139, 971, 7142,
+    ])),
+    dng_entry(50728, 5, 3, struct.pack('<IIIIII', 1, 1, 1, 1, 1, 1)),
+    short(50778, 21),
+]
+extra = bytearray()
+ifd = bytearray(struct.pack('<H', len(entries)))
+end = 8 + 2 + 12 * len(entries) + 4
+for tag, typ, count, data in sorted(entries):
+    if tag == 273:
+        data = struct.pack('<I', end + sum(len(entry[3]) for entry in entries if len(entry[3]) > 4))
+    ifd += struct.pack('<HHI', tag, typ, count)
+    if len(data) > 4:
+        ifd += struct.pack('<I', end + len(extra))
+        extra += data
+    else:
+        ifd += data.ljust(4, b'\0')
+(fixtures / 'raw-bayer-orientation6.dng').write_bytes(b'II*\0\x08\0\0\0' + ifd + b'\0' * 4 + extra + samples)

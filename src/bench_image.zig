@@ -118,10 +118,15 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
     if (std.mem.eql(u8, mode, "read")) return rawRead(argv[2], no_cache);
     if (std.mem.eql(u8, mode, "load")) {
         var counted = std.testing.FailingAllocator.init(std.heap.c_allocator, .{});
-        const started = n.now();
-        const image = try decoder.loadWithLimits(std.mem.span(argv[2]), 0, counted.allocator(), .{ .raw_retirement = true, .tiff_workers = options.workers });
-        const elapsed = (n.now() - started) * 1000;
-        image.destroy();
+        const elapsed = measure: {
+            const started = n.now();
+            const image = try decoder.loadWithLimits(std.mem.span(argv[2]), 0, counted.allocator(), .{ .raw_retirement = true, .tiff_workers = options.workers });
+            const elapsed = (n.now() - started) * 1000;
+            defer image.destroy();
+            if (dump_prefix) |prefix| try dumpRgba(image.native, prefix, 0);
+            output("{{\"mode\":\"image\",\"width\":{d},\"height\":{d},\"bits\":{d},\"backend\":\"{s}\"}}\n", .{ image.width, image.height, image.bits_per_component, @tagName(image.backend) });
+            break :measure elapsed;
+        };
         if (counted.alloc_index != 1 or counted.allocated_bytes != counted.freed_bytes) return error.AllocationInvariant;
         output("{{\"mode\":\"load\",\"wall_ms\":{d:.6},\"allocations\":{d}}}\n", .{ elapsed, counted.alloc_index });
         return;
@@ -207,7 +212,7 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
 pub export fn main(argc: c_int, argv: [*][*:0]const u8) c_int {
     run(argc, argv) catch |err| {
         n.output(2, @errorName(err));
-        n.output(2, "\nUsage: yekk-bench-image read|decode|verify|render|pan|zoom|zoom-sweep|fit-return FILE [--no-cache] [--workers N] [--poison] [--poison-free] [--dynamic] [--native-predictor] [--width N --height N --iterations N] [--nearest] [--checksum-surface]\n");
+        n.output(2, "\nUsage: yekk-bench-image read|load|decode|verify|render|pan|zoom|zoom-sweep|fit-return FILE [--no-cache] [--workers N] [--poison] [--poison-free] [--dynamic] [--native-predictor] [--width N --height N --iterations N] [--nearest] [--checksum-surface] [--dump-rgba PREFIX]\n");
         return 1;
     };
     return 0;

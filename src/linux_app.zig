@@ -2736,3 +2736,28 @@ test "direct PNG and JPEG providers retain ICC, sample precision and a single ow
         try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
     }
 }
+
+test "LibRaw develops an oriented DNG into a single 16-bit slab" {
+    try initTestDecoder();
+    const path = "tests/fixtures/raw-bayer-orientation6.dng";
+    var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    {
+        const image = try decodeWithAllocator(path, allocator.allocator());
+        defer image.destroy();
+        try std.testing.expectEqual(@as(u32, 96), image.pixels.width);
+        try std.testing.expectEqual(@as(u32, 128), image.pixels.height);
+        try std.testing.expectEqual(@as(u32, 16), image.pixels.bits);
+        var metadata: native.Metadata = .{};
+        try std.testing.expectEqual(@as(c_int, 0), native.image.probe(path, &metadata));
+        try std.testing.expectEqual(image.pixels.width, metadata.width);
+        try std.testing.expectEqual(image.pixels.height, metadata.height);
+        var first: [4]u16 = undefined;
+        var last: [4]u16 = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&image.pixels, 0, 0, &first));
+        try std.testing.expectEqual(@as(c_int, 0), native.image.pixel(&image.pixels, 95, 127, &last));
+        try std.testing.expect(first[0] < last[0]);
+        try std.testing.expectEqual(@as(u16, 65535), first[3]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+    try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+}

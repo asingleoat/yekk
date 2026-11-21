@@ -142,7 +142,7 @@ fn operationPath(input: [:0]const u8, output: *[4096]u8) ![:0]const u8 {
 pub fn candidate(name: []const u8) bool {
     const ext = std.fs.path.extension(name);
     inline for (.{ ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".gif", ".bmp", ".webp", ".heic", ".heif", ".avif", ".jxl", ".pbm", ".pgm", ".ppm", ".pnm" }) |supported| if (std.ascii.eqlIgnoreCase(ext, supported)) return true;
-    return false;
+    return @import("source").rawCandidate(name);
 }
 
 pub fn natural(a: []const u8, b: []const u8) std.math.Order {

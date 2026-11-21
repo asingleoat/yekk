@@ -47,6 +47,9 @@ pub fn fromDecoded(decoded: shared.Decoded, space: n.Ref, backend: model.Backend
     return fromDecodedWithAlpha(decoded, space, backend, false);
 }
 pub fn fromDecodedWithAlpha(decoded: shared.Decoded, space: n.Ref, backend: model.Backend, alpha: bool) model.Failure!*model.Image {
+    return fromDecodedChannels(decoded, space, backend, alpha, false);
+}
+pub fn fromDecodedChannels(decoded: shared.Decoded, space: n.Ref, backend: model.Backend, alpha: bool, gray: bool) model.Failure!*model.Image {
     var provider_owns = false;
     errdefer if (!provider_owns) decoded.deinit();
     const image: *model.Image = @ptrCast(decoded.slab.ptr);
@@ -55,7 +58,17 @@ pub fn fromDecodedWithAlpha(decoded: shared.Decoded, space: n.Ref, backend: mode
     const provider = n.CGDataProviderCreateWithData(image, decoded.pixels.ptr, decoded.pixels.len, model.Image.releasePixels) orelse return error.OutOfMemory;
     provider_owns = true;
     defer n.CFRelease(provider);
-    const bitmap: u32 = (if (decoded.bits_per_component == 16) @as(u32, 0x1000) else if (decoded.order == .argb) @as(u32, 0) else 0x4000) | (if (decoded.order == .argb) (if (alpha) @as(u32, 4) else 6) else if (alpha) @as(u32, 3) else 5);
-    image.native = n.CGImageCreate(decoded.width, decoded.height, decoded.bits_per_component, @as(usize, decoded.bits_per_component) * 4, decoded.row_bytes, space, bitmap, provider, null, true, 0) orelse return error.DecodeFailed;
+    const channels: usize = if (gray) (if (alpha) @as(usize, 2) else 1) else 4;
+    const byte_order: u32 = if (decoded.bits_per_component == 16) 0x1000 else if (decoded.order == .argb) 0 else 0x4000;
+    const alpha_info: u32 = if (decoded.order == .argb)
+        (if (alpha) 4 else 6)
+    else if (alpha)
+        3
+    else if (gray)
+        0
+    else
+        5;
+    const bitmap = byte_order | alpha_info;
+    image.native = n.CGImageCreate(decoded.width, decoded.height, decoded.bits_per_component, @as(usize, decoded.bits_per_component) * channels, decoded.row_bytes, space, bitmap, provider, null, true, 0) orelse return error.DecodeFailed;
     return image;
 }

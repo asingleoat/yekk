@@ -52,7 +52,8 @@ for shared settings and controls.
 ## Decoding and display
 
 RGB16 means 16-bit red, green and blue samples. Supported RGB16 TIFFs use the
-shared Zig/libtiff decoder. Other formats use libvips.
+shared Zig/libtiff decoder. JPEG XL and camera RAW use libjxl and LibRaw.
+Other formats use libvips.
 RGB and grayscale images keep their ICC color profiles, which describe how to
 interpret their color values. Other profiled color spaces convert to SDR RGB.
 SDR means standard dynamic range. Floating-point source formats are rejected.

@@ -832,8 +832,8 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
     const path = (entry(id) orelse return false).path;
     // Extension is a scheduling hint only; content still selects the decoder.
     const ext = std.fs.path.extension(path);
-    const is_tiff = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff");
-    const workers: usize = @intCast(@min(available, if (is_tiff) (if (prefetch) @max(1, control.decode_worker_budget / 2) else control.decode_worker_budget) else 1));
+    const is_parallel = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff") or std.ascii.eqlIgnoreCase(ext, ".jxl");
+    const workers: usize = @intCast(@min(available, if (is_parallel) (if (prefetch) @max(1, control.decode_worker_budget / 2) else control.decode_worker_budget) else 1));
     var edge: u32 = 0;
     if (s.pressure == .critical) {
         if (s.cached[id].image) |image| {
@@ -2916,6 +2916,8 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
             return 0;
         }
         if (std.mem.eql(u8, arg, "formats")) {
+            n.output(1, ".jxl\n");
+            inline for (@import("source").raw_suffixes) |suffix| n.output(1, suffix ++ "\n");
             const formats = n.CGImageSourceCopyTypeIdentifiers();
             defer n.CFRelease(formats);
             n.output(1, "ImageIO runtime types; primary/first still image only; variants require OS support.\nlibtiff: unsigned chunky RGB16 TIFF, strips/tiles, all eight orientations; other variants use ImageIO.\n");

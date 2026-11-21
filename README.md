@@ -5,6 +5,9 @@ I paid for the whole machine and I'm going to use the whole machine.
 Yekk is an image viewer for macOS and Linux, written in Zig. It aggressively caches decoded image data to make interactive use as snappy as possible. It will use all of your RAM if it can, and politely return it when the OS requests.
 
 Runs on macOS 14+ or Linux with X11 or Wayland.
+The development build supports JPEG XL on both platforms and camera RAW,
+including Sony ARW, Canon CR2 and CR3, Nikon NEF, Fujifilm RAF and DNG.
+RAW support depends on the camera model.
 
 Download macOS and Linux binaries from [Releases](https://github.com/asingleoat/yekk/releases).
 

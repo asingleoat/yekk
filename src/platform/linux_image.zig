@@ -10,6 +10,7 @@ const build_options = @import("build_options");
 const Extent = @import("raster").Extent;
 const source_file = @import("source");
 const jxl = @import("jxl_pixels");
+const raw = @import("raw_pixels");
 var decode_workers: usize = 1;
 var busy_workers: std.atomic.Value(usize) = .init(0);
 var srgb16: [65536]f32 = undefined;
@@ -49,9 +50,15 @@ pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const s
     const file = source_file.open(std.mem.span(path), false) catch return -1;
     defer file.close();
     if (std.meta.activeTag(file.format) == .jxl) {
-        const header = jxl.probe(file) catch return -1;
+        const header = jxl.probe(file, cancel) catch return -1;
         result.* = .{ .width = header.extent.width, .height = header.extent.height, .bits = header.bits };
         @memcpy(result.format[0..3], "jxl");
+        return 0;
+    }
+    if (file.format == .raw) {
+        const size = raw.probe(file, cancel) catch return -1;
+        result.* = .{ .width = size.width, .height = size.height, .bits = 16 };
+        @memcpy(result.format[0..3], "raw");
         return 0;
     }
     if (std.meta.activeTag(file.format) == .png) {
@@ -94,6 +101,7 @@ pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const s
     return 0;
 }
 pub fn formats() void {
+    inline for (source_file.raw_suffixes) |suffix| _ = c.puts(suffix);
     inline for (.{ ".bmp", ".pbm", ".pgm", ".ppm", ".pnm", ".jxl", ".png", ".jpg", ".jpeg", ".jpe", ".jfif" }) |suffix| _ = c.puts(suffix);
     // Report enabled image readers, rather than every installed native plugin.
     inline for (.{
@@ -255,7 +263,7 @@ fn acquireWorkers(wanted: usize, options: LoadOptions) !usize {
         _ = c.poll(null, 0, 1);
     }
 }
-pub fn reserveTemporary(bytes: u64) Error!void {
+pub fn reserveTemporary(bytes: u64) error{OutOfMemory}!void {
     const available = availableMemory();
     var held = reserved.load(.acquire);
     while (true) {
@@ -304,7 +312,13 @@ pub fn loadOpened(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]
         const workers = try acquireWorkers(decode_workers, load_options);
         defer _ = busy_workers.fetchSub(workers, .release);
         const result = try jxl.load(file, allocator, .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .workers = workers, .cancel = load_options.cancel, .raw_retirement = !build_options.debug_allocator }, reserveTemporary, releaseTemporary);
-        return wrapJxl(result, allocator, owner_offset);
+        return wrapProfiled(result.decoded, allocator, owner_offset, result.opaque_source, result.gray_source);
+    }
+    if (kind == .raw) {
+        const workers = try acquireWorkers(decode_workers, load_options);
+        defer _ = busy_workers.fetchSub(workers, .release);
+        const decoded = try raw.load(file, allocator, .{ .prefix_bytes = owner_offset + @sizeOf(Owner), .workers = workers, .cancel = load_options.cancel, .raw_retirement = !build_options.debug_allocator }, reserveTemporary, releaseTemporary);
+        return wrapDecoded(decoded, allocator, owner_offset);
     }
     if (kind == .tiff) if (try tiff.Plan.open(std.mem.span(path))) |opened| {
         var plan = opened;
@@ -351,9 +365,6 @@ pub fn loadOpened(prefix_bytes: usize, allocator: std.mem.Allocator, path: [*:0]
     owner.* = .{ .allocator = allocator, .slab = slab };
     c.g_object_set_data_full(@ptrCast(pixels.image), "yekk-owner", owner, Owner.destroy);
     return .{ .prefix = @ptrCast(slab.ptr), .pixels = pixels };
-}
-fn wrapJxl(result: jxl.Result, allocator: std.mem.Allocator, owner_offset: usize) !Loaded {
-    return wrapProfiled(result.decoded, allocator, owner_offset, result.opaque_source, result.gray_source);
 }
 fn wrapProfiled(decoded: tiff.Decoded, allocator: std.mem.Allocator, owner_offset: usize, opaque_source: bool, gray_source: bool) !Loaded {
     var owned = true;

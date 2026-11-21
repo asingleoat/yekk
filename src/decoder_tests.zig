@@ -350,3 +350,41 @@ test "SIMD prediction matches libtiff across byte orders, strips and clipped til
         try std.testing.expectEqualSlices(u8, reference.ownedPixels().?, candidate.ownedPixels().?);
     }
 }
+
+test "macOS photo codecs preserve orientation, grayscale profiles, alpha and one owned slab" {
+    inline for (.{
+        .{ "jxl-rgb8-raw.jxl", .jxl, 3, 2, 8 },
+        .{ "jxl-rgb16.jxl", .jxl, 3, 2, 16 },
+        .{ "jxl-gray16.jxl", .jxl, 3, 2, 16 },
+        .{ "jxl-alpha.jxl", .jxl, 3, 2, 8 },
+        .{ "jxl-orientation6.jxl", .jxl, 2, 3, 8 },
+        .{ "raw-bayer-orientation6.dng", .raw, 96, 128, 16 },
+    }) |sample| {
+        const path = "tests/fixtures/" ++ sample[0];
+        var allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        {
+            const image = try decoder.loadWithAllocator(path, 0, allocator.allocator());
+            defer image.destroy();
+            try std.testing.expectEqual(@as(decoder.Backend, sample[1]), image.backend);
+            try std.testing.expectEqual(@as(u32, sample[2]), image.width);
+            try std.testing.expectEqual(@as(u32, sample[3]), image.height);
+            try std.testing.expectEqual(@as(usize, sample[4]), image.bits_per_component);
+            const metadata = try decoder.metadata(path);
+            try std.testing.expectEqual(image.width, metadata.width);
+            try std.testing.expectEqual(image.height, metadata.height);
+            if (comptime std.mem.eql(u8, sample[0], "jxl-gray16.jxl")) {
+                try std.testing.expectEqual(@as(c_int, 0), n.CGColorSpaceGetModel(n.CGImageGetColorSpace(image.native).?));
+            }
+            if (comptime std.mem.eql(u8, sample[0], "jxl-alpha.jxl")) {
+                const pixels = image.ownedPixels().?;
+                const alpha = [6]u8{ 0, 128, 255, 255, 255, 255 };
+                var actual: [6]u8 = undefined;
+                for (&actual, 0..) |*value, i| value.* = pixels[i * 4 + 3];
+                std.mem.sort(u8, &actual, {}, std.sort.asc(u8));
+                try std.testing.expectEqualSlices(u8, &alpha, &actual);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), allocator.alloc_index);
+        try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
+    }
+}

@@ -3,6 +3,14 @@
 //! pixels; retain native precision; one Yekk allocation per representation.
 const std = @import("std");
 const n = @import("platform/native.zig");
+const jxl = @import("jxl_pixels");
+const raw = @import("raw_pixels");
+
+fn reservePhoto(bytes: u64) error{OutOfMemory}!void {
+    const available = n.availableMemory();
+    if (available != 0 and bytes > available) return error.OutOfMemory;
+}
+fn releasePhoto(_: u64) void {}
 
 // Image metadata uses u32 dimensions; this is a representation constraint.
 pub const max_source_dimension = std.math.maxInt(u32);
@@ -42,6 +50,27 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     const opened = try preflight(path, true);
     defer opened.close();
     const source_format = std.meta.activeTag(opened.format);
+    if (source_format == .jxl) {
+        const result = try jxl.load(opened, allocator, .{
+            .prefix_bytes = @sizeOf(Image),
+            .workers = if (limits.tiff_workers == 0) n.performanceCores() else limits.tiff_workers,
+            .keep_gray = true,
+            .raw_retirement = limits.raw_retirement,
+            .cancel = limits.cancel,
+        }, reservePhoto, releasePhoto);
+        const space = pixelSpace(result.decoded, result.gray_source) catch |err| {
+            result.decoded.deinit();
+            return err;
+        };
+        defer n.CFRelease(space);
+        return @import("tiff_decoder.zig").fromDecodedChannels(result.decoded, space, .jxl, !result.opaque_source, result.gray_source);
+    }
+    if (source_format == .raw) {
+        const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse return error.OutOfMemory;
+        defer n.CFRelease(space);
+        const decoded = try raw.load(opened, allocator, .{ .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .cancel = limits.cancel }, reservePhoto, releasePhoto);
+        return @import("tiff_decoder.zig").fromDecoded(decoded, space, .raw);
+    }
     if (source_format == .tiff and max_pixel == 0) if (try @import("tiff_decoder.zig").load(path, allocator, limits)) |decoded| return decoded;
     if (source_format == .pnm) {
         const plan = (try @import("pnm").Plan.open(path, null)) orelse return error.SourceChanged;
@@ -58,7 +87,7 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
         // native decoding and their existing color-space interpretation.
         if (@import("jpeg").fast_huffman_available and !plan.native and plan.sequential and plan.subsampled and !plan.gray) {
             const decoded = try plan.decode(allocator, .{ .order = .argb, .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .cancel = limits.cancel });
-            const space = pngSpace(decoded) catch |err| {
+            const space = pixelSpace(decoded, false) catch |err| {
                 decoded.deinit();
                 return err;
             };
@@ -74,7 +103,7 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
             // Match ImageIO's opaque RGB8 layout. Core Image filters RGBX and
             // XRGB edges differently; write XRGB directly instead of swizzling.
             const decoded = try plan.decode(allocator, .{ .order = if (plan.header.depth != 16 and plan.opaqueSource()) .argb else .rgba, .prefix_bytes = @sizeOf(Image), .row_alignment = 64, .raw_retirement = limits.raw_retirement, .cancel = limits.cancel });
-            const space = pngSpace(decoded) catch |err| {
+            const space = pixelSpace(decoded, false) catch |err| {
                 decoded.deinit();
                 return err;
             };
@@ -150,12 +179,12 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     return image;
 }
 
-fn pngSpace(decoded: @import("png").Decoded) Failure!n.Ref {
+fn pixelSpace(decoded: @import("png").Decoded, gray: bool) Failure!n.Ref {
     if (decoded.profile.len == 0) return n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse error.OutOfMemory;
     const data = n.CFDataCreate(null, decoded.profile.ptr, @intCast(decoded.profile.len)) orelse return error.OutOfMemory;
     defer n.CFRelease(data);
     const space = n.CGColorSpaceCreateWithICCData(data) orelse return error.DecodeFailed;
-    if (n.CGColorSpaceGetModel(space) != 1) {
+    if (n.CGColorSpaceGetModel(space) != @as(c_int, if (gray) 0 else 1)) {
         n.CFRelease(space);
         return error.DecodeFailed;
     }
@@ -177,6 +206,12 @@ pub fn metadataWithCancel(path: []const u8, cancel: ?*const std.atomic.Value(boo
     const opened = try preflight(path, false);
     defer opened.close();
     const source_format = std.meta.activeTag(opened.format);
+    if (source_format == .jxl or source_format == .raw) {
+        const size = if (source_format == .jxl) (try jxl.probe(opened, cancel)).extent else try raw.probe(opened, cancel);
+        var result: Metadata = .{ .width = size.width, .height = size.height, .format_len = 3 };
+        @memcpy(result.format[0..3], if (source_format == .jxl) "jxl" else "raw");
+        return result;
+    }
     if (source_format == .jpeg) {
         const plan = try @import("jpeg").Plan.read(opened, cancel);
         var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height };
