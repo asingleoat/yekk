@@ -17,7 +17,7 @@ p.add_argument('--output', type=Path)
 p.add_argument('--dependency-assets', type=Path, default=os.environ.get('YEKK_DARWIN_RELEASE_ASSETS'))
 a = p.parse_args()
 if a.dependency_assets is None:
-    p.error('dependency notices and sources are required; build in nix develop')
+    p.error('dependency notices are required; build in nix develop')
 source = a.app.resolve(strict=True)
 with (source / 'Contents/Info.plist').open('rb') as stream:
     bundle = plistlib.load(stream)
@@ -136,6 +136,4 @@ with tempfile.TemporaryDirectory(prefix='yekk-dmg-') as temporary:
                     executable_archs=run('/usr/bin/lipo', '-archs', copied_executable).strip())
     output.with_suffix('.json').write_text(json.dumps(manifest, indent=2) + '\n')
     output.with_suffix('.dmg.sha256').write_text(manifest['sha256'] + '  ' + output.name + '\n')
-    for path in a.dependency_assets.glob('*.tar.gz*'):
-        copy_output(path, output.parent / path.name)
     print(f'Built {output} ({output.stat().st_size} bytes)')

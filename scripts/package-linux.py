@@ -132,12 +132,4 @@ manifest['archive_sha256'] = sha(archive)
 manifest['archive_bytes'] = archive.stat().st_size
 (out / (tree.name + '.json')).write_text(json.dumps(manifest, indent=2) + '\n')
 (out / (archive.name + '.sha256')).write_text(manifest['archive_sha256'] + '  ' + archive.name + '\n')
-sources = out / (tree.name + '-library-sources.tar.gz')
-with tarfile.open(sources, 'w:gz') as stream:
-    for path in sorted(a.dependency_sources.iterdir()):
-        source = path.resolve(strict=True)
-        suffix = next((ending for ending in ['.tar.gz', '.tar.xz', '.tar.bz2', '.zip']
-                       if source.name.endswith(ending)), '') if source.is_file() else ''
-        stream.add(source, arcname='library-sources/' + path.name + suffix)
-(out / (sources.name + '.sha256')).write_text(sha(sources) + '  ' + sources.name + '\n')
 print('Built', archive, '(' + str(archive.stat().st_size) + ' bytes)')

@@ -1,6 +1,6 @@
 # Release packaging
 
-A release contains tested binaries, matching source archives and checksums.
+Attach tested portable binaries. Link to the source tag in the release notes.
 Complete local builds and tests before using hosted builds.
 GitHub workflows are disabled. Enabling them and publishing releases require
 manual approval.
@@ -81,18 +81,10 @@ This is a directory distribution, not a single static executable.
 
 ## Release contents
 
-Include these files:
-
-- Platform binaries and SHA-256 checksum files.
-- `LICENSE`, dependency notices and `THIRD-PARTY.json`.
-- Companion archives containing dependency sources, build instructions and patches.
-- The project source archive and the Git commit used to produce it.
-- Runtime-unverified labels for best-effort targets.
-
-A SHA-256 checksum lets users check that a downloaded file matches the release.
-`THIRD-PARTY.json` records bundled dependency versions and licenses.
-Keep pinned dependency sources and Nixpkgs build recipes with the release.
-Generate the project archive from the release commit, not an older candidate.
+Include `LICENSE`, dependency notices and `THIRD-PARTY.json` in each package.
+The Git tag identifies the exact source, including Nix inputs and patches.
+The flake's `release-sources` output contains the pinned dependency sources
+and Nixpkgs build recipes. Record runtime coverage in the release notes.
 
 Run the [validation checks](validation.md) on mounted or extracted packages.
 Store architecture, OS, display backend, file hashes and untested cases under `dist/`.

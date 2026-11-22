@@ -50,6 +50,18 @@
             configureFlags = (old.configureFlags or []) ++ [ "--enable-openmp" ];
           })
         else pkgs.libraw;
+      darwinLibraries = system: import ./packaging/darwin-libraries.nix {
+        pkgs = pkgsFor system;
+        zigObjc = zig-objc;
+        nixpkgsSource = nixpkgsFor system;
+        zig = zigFor system;
+      };
+      linuxLibraries = system: let pkgs = pkgsFor system; in import ./packaging/linux-libraries.nix {
+        inherit pkgs;
+        libraw = librawFor pkgs;
+        nixpkgsSource = nixpkgs-unstable;
+        zig = zigFor system;
+      };
       linuxLibc = pkgs: pkgs.runCommand "yekk-libc.conf" {
         nativeBuildInputs = [ pkgs.stdenv.cc ];
       } ''
@@ -132,9 +144,12 @@
             meta.mainProgram = "yekk";
             meta.license = pkgs.lib.licenses.gpl3Plus;
           };
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+          release-sources = (darwinLibraries system).sources;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          release-sources = (linuxLibraries system).librarySources;
           linux-release-unwrapped = let
-            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; libraw = librawFor pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
+            libraries = linuxLibraries system;
           in self.packages.${system}.yekk.overrideAttrs (old: {
             pname = "yekk-linux-release";
             nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
@@ -171,7 +186,7 @@
             dontAutoPatchelf = true;
           });
           linux-release = let
-            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; libraw = librawFor pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
+            libraries = linuxLibraries system;
             binary = self.packages.${system}.linux-release-unwrapped;
           in pkgs.runCommand "yekk-linux-release-${binary.version}" {
             nativeBuildInputs = [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
@@ -196,7 +211,7 @@
             YEKK_OBJC = "${zig-objc}";
             # Production RGB16 TIFF backend and the optional paging probe.
             YEKK_DARWIN_RELEASE_ASSETS = if pkgs.stdenv.hostPlatform.isDarwin then
-              "${import ./packaging/darwin-libraries.nix { inherit pkgs; zigObjc = zig-objc; nixpkgsSource = nixpkgsFor system; zig = zigFor system; }}" else "";
+              "${(darwinLibraries system).notices}" else "";
             YEKK_TIFF_LIB = "${pkgs.lib.getLib pkgs.libtiff}/lib";
             YEKK_TIFF_INCLUDE = "${pkgs.lib.getDev pkgs.libtiff}/include";
             YEKK_DEFLATE_INCLUDE = "${pkgs.lib.getDev pkgs.libdeflate}/include";
