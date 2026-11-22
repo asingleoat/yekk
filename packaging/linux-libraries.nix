@@ -1,4 +1,4 @@
-{ pkgs, nixpkgsSource, zig }:
+{ pkgs, libraw, nixpkgsSource, zig }:
 let
   lib = pkgs.lib;
   # --static consults Requires.private even for a library that ultimately stays
@@ -61,7 +61,7 @@ let
     ];
     postFixup = "";
   });
-  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.libraw ] ++ privateMetadata;
+  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes libraw ] ++ privateMetadata;
   sourcePackages = dependencies ++ [ pkgs.glibc pkgs.stdenv.cc.cc pkgs.dejavu_fonts zig ];
   sourceInputs = lib.unique (lib.concatMap (package:
     lib.optional (package ? src && lib.isDerivation package.src) package.src
@@ -80,5 +80,9 @@ in {
   librarySources = pkgs.linkFarm "yekk-library-sources" (map (source: {
     name = builtins.unsafeDiscardStringContext (builtins.baseNameOf (toString source));
     path = source;
-  }) sourceInputs ++ [{ name = "nixpkgs-build-recipes"; path = nixpkgsSource; }]);
+  }) sourceInputs ++ [{ name = "nixpkgs-build-recipes"; path = nixpkgsSource; }]
+    ++ lib.optional pkgs.stdenv.hostPlatform.isx86_64 {
+      name = "yekk-libraw-ahd.patch";
+      path = ./libraw-ahd.patch;
+    });
 }

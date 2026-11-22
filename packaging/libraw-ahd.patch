@@ -1,0 +1,57 @@
+--- a/libraw/libraw.h
++++ b/libraw/libraw.h
+@@ -139,2 +139,3 @@
+                                           void *datap);
++  DllDef void libraw_yekk_set_ahd_handler(libraw_data_t *, libraw_yekk_ahd_handler);
+   DllDef const char *libraw_unpack_function_name(libraw_data_t *lr);
+@@ -253,2 +254,4 @@
+
++  void yekk_set_ahd_handler(libraw_yekk_ahd_handler handler);
++
+   static const char* cameramakeridx2maker(unsigned maker);
+--- a/libraw/libraw_internal.h
++++ b/libraw/libraw_internal.h
+@@ -56,2 +56,3 @@
+   } ahd_data;
++  libraw_yekk_ahd_handler yekk_ahd_handler;
+   void init()
+@@ -64,2 +65,3 @@
+     ahd_data.cbrt[0] = -2.0f;
++    yekk_ahd_handler = NULL;
+   }
+--- a/src/libraw_c_api.cpp
++++ b/src/libraw_c_api.cpp
+@@ -226,2 +226,8 @@
+
++  void libraw_yekk_set_ahd_handler(libraw_data_t *lr, libraw_yekk_ahd_handler handler)
++  {
++    if (lr)
++      static_cast<LibRaw *>(lr->parent_class)->yekk_set_ahd_handler(handler);
++  }
++
+   int libraw_adjust_to_raw_inset_crop(libraw_data_t *lr, unsigned mask, float maxcrop)
+--- a/src/demosaic/ahd_demosaic.cpp
++++ b/src/demosaic/ahd_demosaic.cpp
+@@ -174,2 +174,7 @@
+
++void LibRaw::yekk_set_ahd_handler(libraw_yekk_ahd_handler handler)
++{
++  tls->yekk_ahd_handler = handler;
++}
++
+ void LibRaw::ahd_interpolate_build_homogeneity_map(
+@@ -189,2 +194,7 @@
+   const int collimit = MIN(left + LIBRAW_AHD_TILE - 2, width - 4);
++  if (tls->yekk_ahd_handler &&
++      tls->yekk_ahd_handler(LIBRAW_AHD_TILE, rowlimit - top, collimit - left,
++                            &lab[0][0][0][0],
++                            reinterpret_cast<unsigned char *>(out_homogeneity_map)))
++    return;
+   int homogeneity;
+--- a/libraw/libraw_types.h
++++ b/libraw/libraw_types.h
+@@ -157,2 +157,4 @@
+                                    int iteration, int expected);
++  typedef int (*libraw_yekk_ahd_handler)(int tile, int row_end, int col_end,
++                                          const short *lab, unsigned char *scores);
+   typedef int (*pre_identify_callback)(void *ctx);

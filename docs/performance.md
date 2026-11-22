@@ -93,6 +93,15 @@ LibRaw uses OpenMP to run parts of development on multiple CPU cores. These
 workers share the viewer decode budget. The viewer releases LibRaw's
 development buffer before it allocates the cached image.
 
+The x86_64 Linux Nix build uses Zig SIMD for the scoring step in
+adaptive homogeneity-directed demosaicing (AHD). This step compares the
+lightness and color of each pixel with its neighbors in two candidate
+images. Zig keeps three rows of each candidate on the worker's stack
+and scores eight adjacent pixels at a time. The LibRaw hook supplies
+the tile and its borders. Use `-Dsimd-demosaic=false` to compare with
+LibRaw scoring. Apple Silicon uses LibRaw scoring by default. Set
+`-Dsimd-demosaic=true` to test the Zig scorer on that platform.
+
 Measure unpacking and development separately when comparing RAW decoders.
 Replacing the unpacker can only reduce the first cost. Use the same camera
 file, color settings and output precision when checking a faster path.

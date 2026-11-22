@@ -157,6 +157,9 @@ pub fn load(file: source.Open, allocator: std.mem.Allocator, options: Options, c
     try check(c.libraw_unpack(session.raw));
     if (read_failure.load(.acquire)) return error.IncompleteImage;
     try session.ensureCurrent();
+    if (@import("raw_options").simd_demosaic and @hasDecl(c, "libraw_yekk_set_ahd_handler")) {
+        c.libraw_yekk_set_ahd_handler(session.raw, @import("raw_ahd.zig").score);
+    }
     try check(c.libraw_dcraw_process(session.raw));
     try session.ensureCurrent();
     var status: c_int = c.LIBRAW_SUCCESS;

@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) !void {
     command_root.addImport("runtime", services);
     const command_tests = b.addTest(.{ .root_module = command_root });
     test_step.dependOn(&b.addRunArtifact(command_tests).step);
-    inline for (.{ "cli", "session_input", "source", "navigation", "view_actions", "hook_execution", "color" }) |name| {
+    inline for (.{ "cli", "session_input", "source", "navigation", "view_actions", "hook_execution", "color", "raw_ahd" }) |name| {
         const shared = if (comptime std.mem.eql(u8, name, "source")) source else b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (shared != source) shared.addImport("source", source);
         shared.addImport("system", system);
@@ -295,7 +295,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     linuxLibC(b, png_tests);
     tests.dependOn(&b.addRunArtifact(png_tests).step);
     tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = source.import_table.get("bmp").? })).step);
-    inline for (.{ "core", "catalog", "cache", "actions", "geometry", "options", "hooks", "commands", "sessions", "navigation", "view_actions", "hook_execution", "cli", "session_input", "source", "linux_controls", "linux_menu", "color" }) |name| {
+    inline for (.{ "core", "catalog", "cache", "actions", "geometry", "options", "hooks", "commands", "sessions", "navigation", "view_actions", "hook_execution", "cli", "session_input", "source", "linux_controls", "linux_menu", "color", "raw_ahd" }) |name| {
         const module = if (comptime std.mem.eql(u8, name, "geometry")) geometry else if (comptime std.mem.eql(u8, name, "color")) color else if (comptime std.mem.eql(u8, name, "source")) source else b.createModule(.{ .root_source_file = b.path("src/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
         if (module != source) module.addImport("source", source);
         module.addImport("system", system);
@@ -541,6 +541,12 @@ fn photoModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         module.addImport("source", source);
         module.addImport("raster", raster);
         module.addImport("pixel_storage", storage);
+        if (comptime std.mem.eql(u8, codec[0], "raw")) {
+            const options = b.addOptions();
+            const default_simd = target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
+            options.addOption(bool, "simd_demosaic", b.option(bool, "simd-demosaic", "Use Zig SIMD scoring with the patched LibRaw") orelse default_simd);
+            module.addOptions("raw_options", options);
+        }
         @field(modules, codec[0]) = module;
     }
     return modules;

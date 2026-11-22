@@ -30,8 +30,14 @@
         '';
       });
       librawFor = pkgs:
-        if pkgs.stdenv.hostPlatform.isDarwin && pkgs.stdenv.hostPlatform.isAarch64 then
+        let
+          platform = pkgs.stdenv.hostPlatform;
+          appleSilicon = platform.isDarwin && platform.isAarch64;
+          simdHook = (platform.isLinux && platform.isx86_64) || appleSilicon;
+        in if simdHook then
           pkgs.libraw.overrideAttrs (old: {
+            patches = (old.patches or []) ++ [ ./packaging/libraw-ahd.patch ];
+          } // pkgs.lib.optionalAttrs appleSilicon {
             buildInputs = (old.buildInputs or []) ++ [ pkgs.llvmPackages.openmp ];
             # Upstream exposes a flag to opt into OpenMP on Apple Clang.
             env = (old.env or {}) // { NIX_CFLAGS_COMPILE = "-DLIBRAW_FORCE_OPENMP"; };
@@ -122,7 +128,7 @@
           };
         } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           linux-release-unwrapped = let
-            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
+            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; libraw = librawFor pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
           in self.packages.${system}.yekk.overrideAttrs (old: {
             pname = "yekk-linux-release";
             nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
@@ -159,7 +165,7 @@
             dontAutoPatchelf = true;
           });
           linux-release = let
-            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
+            libraries = import ./packaging/linux-libraries.nix { inherit pkgs; libraw = librawFor pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
             binary = self.packages.${system}.linux-release-unwrapped;
           in pkgs.runCommand "yekk-linux-release-${binary.version}" {
             nativeBuildInputs = [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
