@@ -36,7 +36,8 @@
           simdHook = (platform.isLinux && platform.isx86_64) || appleSilicon;
         in if simdHook then
           pkgs.libraw.overrideAttrs (old: {
-            patches = (old.patches or []) ++ [ ./packaging/libraw-ahd.patch ];
+            patches = (old.patches or []) ++ [ ./packaging/libraw-ahd.patch ]
+              ++ pkgs.lib.optional appleSilicon ./packaging/libraw-locality.patch;
           } // pkgs.lib.optionalAttrs appleSilicon {
             buildInputs = (old.buildInputs or []) ++ [ pkgs.llvmPackages.openmp ];
             # Upstream exposes a flag to opt into OpenMP on Apple Clang.
@@ -68,7 +69,7 @@
           default = yekk;
           yekk = pkgs.stdenvNoCC.mkDerivation {
             pname = "yekk";
-            version = "0.2.4";
+            version = "0.2.5";
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [

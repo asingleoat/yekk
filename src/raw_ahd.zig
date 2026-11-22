@@ -27,20 +27,65 @@ fn scoreTile(lab: *const Lab, scores: *Scores, row_end: usize, col_end: usize) v
         const center = &rows[(y - 1) % 3];
         const below = &rows[y % 3];
         pack(below, lab, y + 1, col_end);
-        var x: usize = 2;
-        while (x + 8 <= col_end) : (x += 8) scoreBlock(8, above, center, below, x, &scores[y]);
-        if (x + 4 <= col_end) {
-            scoreBlock(4, above, center, below, x, &scores[y]);
-            x += 4;
-        }
-        while (x < col_end) : (x += 1) scoreBlock(1, above, center, below, x, &scores[y]);
+        scoreRow(above, center, below, col_end, &scores[y]);
+    }
+}
+
+fn scoreRow(above: *const Row, center: *const Row, below: *const Row, col_end: usize, scores: *[side][2]u8) void {
+    var x: usize = 2;
+    while (x + 8 <= col_end) : (x += 8) scoreBlock(8, above, center, below, x, scores);
+    if (x + 4 <= col_end) {
+        scoreBlock(4, above, center, below, x, scores);
+        x += 4;
+    }
+    while (x < col_end) : (x += 1) scoreBlock(1, above, center, below, x, scores);
+}
+
+const PackedRow = [side][3]i16;
+const ConvertRow = *const fn (?*anyopaque, c_int, c_int, c_int, c_uint, [*c]u16, [*c]i16, [*c]i16) callconv(.c) void;
+
+pub fn rolling(
+    convert: ?ConvertRow,
+    context: ?*anyopaque,
+    top: c_int,
+    left: c_int,
+    row_end: c_int,
+    col_end: c_int,
+    rgb: [*c]u16,
+    raw_scores: [*c]u8,
+) callconv(.c) void {
+    // The pinned LibRaw driver supplies the tile and exclusive score bounds.
+    const nextRow = convert.?;
+    const scores: *Scores = @ptrCast(raw_scores);
+    @memset(std.mem.asBytes(scores), 0);
+    if (row_end == 2 or col_end == 2) return;
+    const end_x: usize = @intCast(col_end);
+    const end_y: usize = @intCast(row_end);
+    const clip_x: c_uint = @intCast(left + col_end + 1);
+    var lab: [2]PackedRow = undefined;
+    var rows: [3]Row = undefined;
+    for (1..3) |y| {
+        nextRow(context, top + @as(c_int, @intCast(y)), top, left, clip_x, rgb, &lab[0][0][0], &lab[1][0][0]);
+        packRow(&rows[y - 1], .{ &lab[0], &lab[1] }, end_x);
+    }
+    for (2..end_y) |y| {
+        const above = &rows[(y - 2) % 3];
+        const center = &rows[(y - 1) % 3];
+        const below = &rows[y % 3];
+        nextRow(context, top + @as(c_int, @intCast(y + 1)), top, left, clip_x, rgb, &lab[0][0][0], &lab[1][0][0]);
+        packRow(below, .{ &lab[0], &lab[1] }, end_x);
+        scoreRow(above, center, below, end_x, &scores[y]);
     }
 }
 
 fn pack(out: *Row, lab: *const Lab, y: usize, col_end: usize) void {
+    packRow(out, .{ &lab[0][y], &lab[1][y] }, col_end);
+}
+
+fn packRow(out: *Row, src: [2]*const PackedRow, col_end: usize) void {
     inline for (0..2) |direction| {
         for (1..col_end + 1) |x| {
-            const pixel = lab[direction][y][x];
+            const pixel = src[direction][x];
             out[direction][0][x] = pixel[0];
             out[direction][1][x] = pixel[1];
             out[direction][2][x] = pixel[2];

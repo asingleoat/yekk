@@ -1,0 +1,307 @@
+--- a/libraw/libraw_types.h
++++ b/libraw/libraw_types.h
+@@ -157,6 +157,8 @@
+                                    int iteration, int expected);
+   typedef int (*libraw_yekk_ahd_handler)(int tile, int row_end, int col_end,
+                                           const short *lab, unsigned char *scores);
++  typedef void (*libraw_yekk_ahd_row)(void *, int, int, int, unsigned, unsigned short *, short *, short *);
++  typedef void (*libraw_yekk_ahd_rows_handler)(libraw_yekk_ahd_row, void *, int, int, int, int, unsigned short *, unsigned char *);
+   typedef int (*pre_identify_callback)(void *ctx);
+   typedef void (*post_identify_callback)(void *ctx);
+   typedef void (*process_step_callback)(void *ctx);
+--- a/libraw/libraw.h
++++ b/libraw/libraw.h
+@@ -138,6 +138,8 @@
+   DllDef void libraw_set_progress_handler(libraw_data_t *, progress_callback cb,
+                                           void *datap);
+   DllDef void libraw_yekk_set_ahd_handler(libraw_data_t *, libraw_yekk_ahd_handler);
++  DllDef void libraw_yekk_set_ahd_rows_handler(libraw_data_t *, libraw_yekk_ahd_rows_handler);
++  DllDef int libraw_yekk_prepare_rgba16(libraw_data_t *, int *, int *, int *, int *);
+   DllDef const char *libraw_unpack_function_name(libraw_data_t *lr);
+   DllDef int libraw_get_decoder_info(libraw_data_t *lr,
+                                      libraw_decoder_info_t *d);
+@@ -253,6 +255,8 @@
+   }
+ 
+   void yekk_set_ahd_handler(libraw_yekk_ahd_handler handler);
++  void yekk_set_ahd_rows_handler(libraw_yekk_ahd_rows_handler handler);
++  int yekk_prepare_mem_image();
+ 
+   static const char* cameramakeridx2maker(unsigned maker);
+   int setMakeFromIndex(unsigned index);
+--- a/libraw/libraw_internal.h
++++ b/libraw/libraw_internal.h
+@@ -55,6 +55,7 @@
+     float cbrt[0x10000], xyz_cam[3][4];
+   } ahd_data;
+   libraw_yekk_ahd_handler yekk_ahd_handler;
++  libraw_yekk_ahd_rows_handler yekk_ahd_rows_handler;
+   void init()
+   {
+     getbits.bitbuf = 0;
+@@ -64,6 +65,7 @@
+     pana_data.vpos = 0;
+     ahd_data.cbrt[0] = -2.0f;
+     yekk_ahd_handler = NULL;
++    yekk_ahd_rows_handler = NULL;
+   }
+ };
+ 
+--- a/internal/libraw_internal_funcs.h
++++ b/internal/libraw_internal_funcs.h
+@@ -363,6 +363,7 @@
+ 	void        tiff_head (struct tiff_hdr *th, int full);
+ 
+ // split AHD code
++	void yekk_ahd_convert_row(unsigned row, int left, unsigned collimit, ushort (*rgb)[3], short (*lab)[3]);
+ 	void ahd_interpolate_green_h_and_v(int top, int left, ushort (*out_rgb)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3]);
+ 	void ahd_interpolate_r_and_b_in_rgb_and_convert_to_cielab(int top, int left, ushort (*inout_rgb)[LIBRAW_AHD_TILE][3], short (*out_lab)[LIBRAW_AHD_TILE][3]);
+ 	void ahd_interpolate_r_and_b_and_convert_to_cielab(int top, int left, ushort (*inout_rgb)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3], short (*out_lab)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3]);
+--- a/src/libraw_c_api.cpp
++++ b/src/libraw_c_api.cpp
+@@ -230,6 +230,21 @@
+       static_cast<LibRaw *>(lr->parent_class)->yekk_set_ahd_handler(handler);
+   }
+ 
++  void libraw_yekk_set_ahd_rows_handler(libraw_data_t *lr, libraw_yekk_ahd_rows_handler handler)
++  {
++    if (lr)
++      static_cast<LibRaw *>(lr->parent_class)->yekk_set_ahd_rows_handler(handler);
++  }
++
++  int libraw_yekk_prepare_rgba16(libraw_data_t *lr, int *width, int *height, int *colors, int *bps)
++  {
++    if (!lr)
++      return LIBRAW_UNSPECIFIED_ERROR;
++    LibRaw *raw = static_cast<LibRaw *>(lr->parent_class);
++    raw->get_mem_image_format(width, height, colors, bps);
++    return raw->yekk_prepare_mem_image();
++  }
++
+   int libraw_adjust_to_raw_inset_crop(libraw_data_t *lr, unsigned mask, float maxcrop)
+   {
+     if (!lr)
+--- a/src/postprocessing/mem_image.cpp
++++ b/src/postprocessing/mem_image.cpp
+@@ -183,11 +183,8 @@
+   *bps = O.output_bps;
+ }
+ 
+-int LibRaw::copy_mem_image(void *scan0, int stride, int bgr)
+-
+-{
+-  // the image memory pointed to by scan0 is assumed to be in the format
+-  // returned by get_mem_image_format
++int LibRaw::yekk_prepare_mem_image()
++{
+   if ((imgdata.progress_flags & LIBRAW_PROGRESS_THUMB_MASK) <
+       LIBRAW_PROGRESS_PRE_INTERPOLATE)
+     return LIBRAW_OUT_OF_ORDER_CALL;
+@@ -210,6 +207,15 @@
+       }
+     gamma_curve(O.gamm[0], O.gamm[1], 2, int((t_white << 3) / O.bright));
+   }
++
++  return LIBRAW_SUCCESS;
++}
++
++int LibRaw::copy_mem_image(void *scan0, int stride, int bgr)
++{
++  const int status = yekk_prepare_mem_image();
++  if (status != LIBRAW_SUCCESS)
++    return status;
+ 
+   int s_iheight = S.iheight;
+   int s_iwidth = S.iwidth;
+--- a/src/demosaic/ahd_demosaic.cpp
++++ b/src/demosaic/ahd_demosaic.cpp
+@@ -98,67 +98,61 @@
+     }
+   }
+ }
++inline void LibRaw::yekk_ahd_convert_row(unsigned row, int left, unsigned collimit,
++                                         ushort (*rix)[3], short (*lix)[3])
++{
++  ushort (*pix)[4] = image + row * width + left;
++  const unsigned num_pix_per_row = 4 * width;
++  int c, val, t1, t2;
++  ushort *pix_above, *pix_below;
++  for (unsigned col = left + 1; col < collimit; col++)
++  {
++    pix++;
++    pix_above = &pix[0][0] - num_pix_per_row;
++    pix_below = &pix[0][0] + num_pix_per_row;
++    rix++;
++    lix++;
++
++    c = 2 - FC(row, col);
++
++    if (c == 1)
++    {
++      c = FC(row + 1, col);
++      t1 = 2 - c;
++      val = pix[0][1] +
++            ((pix[-1][t1] + pix[1][t1] - rix[-1][1] - rix[1][1]) >> 1);
++      rix[0][t1] = CLIP(val);
++      val =
++          pix[0][1] + ((pix_above[c] + pix_below[c] -
++                        rix[-LIBRAW_AHD_TILE][1] - rix[LIBRAW_AHD_TILE][1]) >>
++                       1);
++    }
++    else
++    {
++      t1 = -4 + c; /* -4+c: pixel of color c to the left */
++      t2 = 4 + c;  /* 4+c: pixel of color c to the right */
++      val = rix[0][1] +
++            ((pix_above[t1] + pix_above[t2] + pix_below[t1] + pix_below[t2] -
++              rix[-LIBRAW_AHD_TILE - 1][1] - rix[-LIBRAW_AHD_TILE + 1][1] -
++              rix[+LIBRAW_AHD_TILE - 1][1] - rix[+LIBRAW_AHD_TILE + 1][1] +
++              1) >>
++             2);
++    }
++    rix[0][c] = CLIP(val);
++    c = FC(row, col);
++    rix[0][c] = pix[0][c];
++    cielab(rix[0], lix[0]);
++  }
++}
++
+ void LibRaw::ahd_interpolate_r_and_b_in_rgb_and_convert_to_cielab(
+     int top, int left, ushort (*inout_rgb)[LIBRAW_AHD_TILE][3],
+     short (*out_lab)[LIBRAW_AHD_TILE][3])
+ {
+-  unsigned row, col;
+-  int c, val;
+-  ushort(*pix)[4];
+-  ushort(*rix)[3];
+-  short(*lix)[3];
+-  const unsigned num_pix_per_row = 4 * width;
+   const unsigned rowlimit = MIN(top + LIBRAW_AHD_TILE - 1, height - 3);
+   const unsigned collimit = MIN(left + LIBRAW_AHD_TILE - 1, width - 3);
+-  ushort *pix_above;
+-  ushort *pix_below;
+-  int t1, t2;
+-
+-  for (row = top + 1; row < rowlimit; row++)
+-  {
+-    pix = image + row * width + left;
+-    rix = &inout_rgb[row - top][0];
+-    lix = &out_lab[row - top][0];
+-
+-    for (col = left + 1; col < collimit; col++)
+-    {
+-      pix++;
+-      pix_above = &pix[0][0] - num_pix_per_row;
+-      pix_below = &pix[0][0] + num_pix_per_row;
+-      rix++;
+-      lix++;
+-
+-      c = 2 - FC(row, col);
+-
+-      if (c == 1)
+-      {
+-        c = FC(row + 1, col);
+-        t1 = 2 - c;
+-        val = pix[0][1] +
+-              ((pix[-1][t1] + pix[1][t1] - rix[-1][1] - rix[1][1]) >> 1);
+-        rix[0][t1] = CLIP(val);
+-        val =
+-            pix[0][1] + ((pix_above[c] + pix_below[c] -
+-                          rix[-LIBRAW_AHD_TILE][1] - rix[LIBRAW_AHD_TILE][1]) >>
+-                         1);
+-      }
+-      else
+-      {
+-        t1 = -4 + c; /* -4+c: pixel of color c to the left */
+-        t2 = 4 + c;  /* 4+c: pixel of color c to the right */
+-        val = rix[0][1] +
+-              ((pix_above[t1] + pix_above[t2] + pix_below[t1] + pix_below[t2] -
+-                rix[-LIBRAW_AHD_TILE - 1][1] - rix[-LIBRAW_AHD_TILE + 1][1] -
+-                rix[+LIBRAW_AHD_TILE - 1][1] - rix[+LIBRAW_AHD_TILE + 1][1] +
+-                1) >>
+-               2);
+-      }
+-      rix[0][c] = CLIP(val);
+-      c = FC(row, col);
+-      rix[0][c] = pix[0][c];
+-      cielab(rix[0], lix[0]);
+-    }
+-  }
++  for (unsigned row = top + 1; row < rowlimit; row++)
++    yekk_ahd_convert_row(row, left, collimit, inout_rgb[row - top], out_lab[row - top]);
+ }
+ void LibRaw::ahd_interpolate_r_and_b_and_convert_to_cielab(
+     int top, int left, ushort (*inout_rgb)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3],
+@@ -175,6 +169,11 @@
+ void LibRaw::yekk_set_ahd_handler(libraw_yekk_ahd_handler handler)
+ {
+   tls->yekk_ahd_handler = handler;
++}
++
++void LibRaw::yekk_set_ahd_rows_handler(libraw_yekk_ahd_rows_handler handler)
++{
++  tls->yekk_ahd_rows_handler = handler;
+ }
+ 
+ void LibRaw::ahd_interpolate_build_homogeneity_map(
+@@ -303,6 +302,15 @@
+ void LibRaw::ahd_interpolate()
+ {
+     int terminate_flag = 0;
++    const auto rows_handler = tls->yekk_ahd_rows_handler;
++    const libraw_yekk_ahd_row convert_row =
++        [](void *raw, int row, int top, int left, unsigned end, unsigned short *plane, short *lab0, short *lab1)
++        {
++            auto *self = static_cast<LibRaw *>(raw);
++            auto *rgb = reinterpret_cast<ushort (*)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3]>(plane);
++            self->yekk_ahd_convert_row(row, left, end, rgb[0][row - top], reinterpret_cast<short (*)[3]>(lab0));
++            self->yekk_ahd_convert_row(row, left, end, rgb[1][row - top], reinterpret_cast<short (*)[3]>(lab1));
++        };
+     cielab(0, 0);
+     border_interpolate(5);
+ 
+@@ -312,11 +320,13 @@
+     int buffer_count = 1;
+ #endif
+ 
+-    size_t buffer_size = 26 * LIBRAW_AHD_TILE * LIBRAW_AHD_TILE; /* 1664 kB */
++    const size_t rgb_bytes = 12 * LIBRAW_AHD_TILE * LIBRAW_AHD_TILE;
++    const size_t lab_bytes = rows_handler ? 0 : rgb_bytes;
++    const size_t buffer_size = rgb_bytes + lab_bytes + 2 * LIBRAW_AHD_TILE * LIBRAW_AHD_TILE;
+     char** buffers = malloc_omp_buffers(buffer_count, buffer_size);
+ 
+ #ifdef LIBRAW_USE_OPENMP
+-#pragma omp parallel for schedule(dynamic) default(none) shared(terminate_flag) firstprivate(buffers)
++#pragma omp parallel for schedule(dynamic) default(none) shared(terminate_flag) firstprivate(buffers, rows_handler, convert_row, rgb_bytes, lab_bytes)
+ #endif
+     for (int top = 2; top < height - 5; top += LIBRAW_AHD_TILE - 6)
+     {
+@@ -344,16 +354,23 @@
+ 
+         rgb = (ushort(*)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3])buffer;
+         lab = (short(*)[LIBRAW_AHD_TILE][LIBRAW_AHD_TILE][3])(
+-            buffer + 12 * LIBRAW_AHD_TILE * LIBRAW_AHD_TILE);
+-        homo = (char(*)[LIBRAW_AHD_TILE][2])(buffer + 24 * LIBRAW_AHD_TILE *
+-            LIBRAW_AHD_TILE);
++            buffer + rgb_bytes);
++        homo = (char(*)[LIBRAW_AHD_TILE][2])(buffer + rgb_bytes + lab_bytes);
+ 
+         for (int left = 2; !terminate_flag && (left < width - 5);
+             left += LIBRAW_AHD_TILE - 6)
+         {
+             ahd_interpolate_green_h_and_v(top, left, rgb);
+-            ahd_interpolate_r_and_b_and_convert_to_cielab(top, left, rgb, lab);
+-            ahd_interpolate_build_homogeneity_map(top, left, lab, homo);
++            if (rows_handler)
++                rows_handler(convert_row, this, top, left,
++                             MIN(top + LIBRAW_AHD_TILE - 2, height - 4) - top,
++                             MIN(left + LIBRAW_AHD_TILE - 2, width - 4) - left,
++                             &rgb[0][0][0][0], reinterpret_cast<unsigned char *>(homo));
++            else
++            {
++                ahd_interpolate_r_and_b_and_convert_to_cielab(top, left, rgb, lab);
++                ahd_interpolate_build_homogeneity_map(top, left, lab, homo);
++            }
+             ahd_interpolate_combine_homogeneous_pixels(top, left, rgb, homo);
+         }
+     }

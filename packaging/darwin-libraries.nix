@@ -10,10 +10,10 @@ let
   }) packages ++ [
     { name = "zig-objc"; path = zigObjc; }
     { name = "nixpkgs-build-recipes"; path = nixpkgsSource; }
-  ] ++ lib.optional pkgs.stdenv.hostPlatform.isAarch64 {
-    name = "yekk-libraw-ahd.patch";
-    path = ./libraw-ahd.patch;
-  });
+  ] ++ lib.optionals pkgs.stdenv.hostPlatform.isAarch64 [
+    { name = "yekk-libraw-ahd.patch"; path = ./libraw-ahd.patch; }
+    { name = "yekk-libraw-locality.patch"; path = ./libraw-locality.patch; }
+  ]);
   metadata = pkgs.writeText "yekk-macos-dependencies.json" (builtins.toJSON (
     map (package: {
       name = package.pname;

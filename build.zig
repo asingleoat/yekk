@@ -543,7 +543,9 @@ fn photoModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         module.addImport("pixel_storage", storage);
         if (comptime std.mem.eql(u8, codec[0], "raw")) {
             const options = b.addOptions();
-            const default_simd = target.result.os.tag == .linux and target.result.cpu.arch == .x86_64;
+            const os = target.result.os.tag;
+            const arch = target.result.cpu.arch;
+            const default_simd = (os == .linux and arch == .x86_64) or (os == .macos and arch == .aarch64);
             options.addOption(bool, "simd_demosaic", b.option(bool, "simd-demosaic", "Use Zig SIMD scoring with the patched LibRaw") orelse default_simd);
             module.addOptions("raw_options", options);
         }
