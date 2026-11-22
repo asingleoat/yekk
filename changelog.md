@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4 — 2026-11-21
+
+- Open JPEG XL and camera RAW files on macOS and Linux. RAW support includes
+  Sony ARW, Canon CR2 and CR3, Nikon NEF, and DNG.
+- Develop RAW images in parallel on Apple Silicon using LibRaw. The decoder
+  preserves the full-resolution 16-bit output.
+- Release temporary RAW pixels earlier to reduce peak memory use on macOS
+  and Linux.
+
 ## 0.2.3 — 2026-11-15
 
 - Holding a navigation key displays each image for at least one frame. A new

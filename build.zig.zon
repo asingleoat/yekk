@@ -1,7 +1,7 @@
 .{
     .name = .yekk,
     .fingerprint = 0x2506337dedeefcbf,
-    .version = "0.2.3",
+    .version = "0.2.4",
     .minimum_zig_version = "0.18.0-dev.470+6817928c3",
     .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "packaging", "LICENSE", "README.md" },
 }

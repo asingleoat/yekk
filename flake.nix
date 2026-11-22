@@ -62,7 +62,7 @@
           default = yekk;
           yekk = pkgs.stdenvNoCC.mkDerivation {
             pname = "yekk";
-            version = "0.2.3";
+            version = "0.2.4";
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
@@ -161,7 +161,7 @@
           linux-release = let
             libraries = import ./packaging/linux-libraries.nix { inherit pkgs; nixpkgsSource = nixpkgs-unstable; zig = zigFor system; };
             binary = self.packages.${system}.linux-release-unwrapped;
-          in pkgs.runCommand "yekk-linux-release-0.2.3" {
+          in pkgs.runCommand "yekk-linux-release-${binary.version}" {
             nativeBuildInputs = [ pkgs.python3 pkgs.patchelf pkgs.binutils (pkgs.lib.getBin pkgs.glibc) ];
             meta.platforms = pkgs.lib.platforms.linux;
           } ''
@@ -169,7 +169,7 @@
                 --output "$out" --font ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf \
                 --mime ${pkgs.shared-mime-info}/share/mime \
                 --source ${binary.src} --dependency-sources ${libraries.librarySources} \
-                --dependency-metadata ${libraries.metadata} --version 0.2.3
+                --dependency-metadata ${libraries.metadata} --version ${binary.version}
           '';
         });
       devShells = eachSystem (system:
