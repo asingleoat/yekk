@@ -15,11 +15,12 @@ Record which runtime tests were performed on each package.
 | macOS 14+, ARM64 | DMG disk image | Run on Apple Silicon. |
 | macOS 14+, x86_64 | DMG disk image | Record whether execution used Intel hardware or Rosetta. |
 | Linux x86_64 | Compressed tar archive | Test viewing, relocation and filesystem isolation. |
-| Linux ARM64 (aarch64) | Compressed tar archive | Best effort; runtime unverified until tested on ARM hardware. |
+| Linux ARM64 (aarch64) | Compressed tar archive | Best effort. Record VM and physical desktop checks separately. |
 
 Rosetta runs Intel programs on Apple Silicon. Its results do not establish
 native Intel hardware coverage. An aarch64 package must build successfully.
-Label its runtime-unverified status. ARM hardware tests do not block the release.
+Label the runtime checks that were possible. ARM hardware tests do not block
+the release.
 
 ## macOS
 

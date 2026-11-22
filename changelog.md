@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5 — 2026-11-21
+
+- Load camera RAW files faster on Apple Silicon. Write directly to the final
+  16-bit pixel buffer and process rotated images in blocks.
+- Use less demosaicing scratch memory on Apple Silicon. Score Bayer RAW
+  pixels with SIMD on Apple Silicon and x86_64 Linux.
+
 ## 0.2.4 — 2026-11-21
 
 - Open JPEG XL and camera RAW files on macOS and Linux. RAW support includes

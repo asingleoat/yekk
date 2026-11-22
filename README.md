@@ -28,12 +28,16 @@ See the [method, all timings and limits](docs/viewer-comparison.md).
 
 ### Camera RAW
 
-On Linux, the fastest times from launch to the first fitted photo across three
+On Linux with Yekk 0.2.4, the fastest times from launch to the first fitted photo across three
 RAW files were 0.79–0.95 s for Yekk, 1.60–1.78 s for Geeqie, and 3.40–3.43 s
 for darktable. Geeqie showed the camera's embedded JPEG. Yekk and darktable
 developed the sensor data.
 
 ![Time to the first fitted RAW photo in Yekk, Geeqie, and darktable](docs/assets/raw-comparison.svg)
+
+On Apple Silicon, v0.2.5 loaded three landscape RAW files in
+4–8% less time than v0.2.4. A rotated Sony ARW took
+25% less time. This test measured full-image loading before display.
 
 See the [RAW test method and all timings](docs/raw-comparison.md).
 

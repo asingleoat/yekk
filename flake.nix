@@ -27,7 +27,12 @@
           substituteInPlace "$out/lib/compiler/Maker/Step/Compile.zig" \
             --replace-fail 'zig_args.appendAssumeCapacity(dynamic_linker_path);' \
             'zig_args.appendAssumeCapacity(try arena.dupe(u8, dynamic_linker_path));'
-        '';
+        '' + (nixpkgs.lib.optionalString (system == "aarch64-linux") ''
+          # The pinned compiler can lose response files in the ARM Linux build.
+          # This limit keeps the release argument list within Linux's exec limits.
+          substituteInPlace "$out/lib/compiler/Maker/Step/Compile.zig" \
+            --replace-fail 'args_length >= 30 * 1024' 'args_length >= 512 * 1024'
+        '');
       });
       librawFor = pkgs:
         let

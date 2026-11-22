@@ -90,17 +90,22 @@ Development uses camera white balance when available. It includes demosaicing,
 which estimates the missing color channels at each sensor pixel. The viewer
 caches the developed image at full resolution. On Linux and Apple Silicon,
 LibRaw uses OpenMP to run parts of development on multiple CPU cores. These
-workers share the viewer decode budget. The viewer releases LibRaw's
-development buffer before it allocates the cached image.
+workers share the viewer decode budget.
 
-The x86_64 Linux Nix build uses Zig SIMD for the scoring step in
-adaptive homogeneity-directed demosaicing (AHD). This step compares the
-lightness and color of each pixel with its neighbors in two candidate
-images. Zig keeps three rows of each candidate on the worker's stack
-and scores eight adjacent pixels at a time. The LibRaw hook supplies
-the tile and its borders. Use `-Dsimd-demosaic=false` to compare with
-LibRaw scoring. Apple Silicon uses LibRaw scoring by default. Set
-`-Dsimd-demosaic=true` to test the Zig scorer on that platform.
+The x86_64 Linux and Apple Silicon Nix builds use Zig SIMD for the scoring
+step in adaptive homogeneity-directed demosaicing (AHD). The scorer compares
+the lightness and color of each pixel with its neighbors in two candidate
+images. It keeps three rows of each candidate on the worker's stack and
+scores eight adjacent pixels at a time. On Apple Silicon, LibRaw supplies
+one row at a time and reuses the space for earlier rows. Use
+`-Dsimd-demosaic=false` to use LibRaw scoring.
+
+The Apple Silicon Nix build applies LibRaw's tone curve and orientation
+while it writes the final RGBA16 pixels. When the image axes are swapped,
+it processes 32×32 blocks to reuse neighboring source pixels in cache.
+The developed pixels stay in memory until this pass ends. Other builds
+release LibRaw's development buffer after producing the intermediate
+RGB16 image, before allocating the final pixel buffer.
 
 Measure unpacking and development separately when comparing RAW decoders.
 Replacing the unpacker can only reduce the first cost. Use the same camera
