@@ -1,6 +1,6 @@
 # Release packaging
 
-Attach tested portable binaries. Link to the source tag in the release notes.
+Attach tested portable binaries.
 Complete local builds and tests before using hosted builds.
 GitHub workflows are disabled. Enabling them and publishing releases require
 manual approval.
