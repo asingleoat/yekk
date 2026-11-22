@@ -75,6 +75,13 @@ fn progress(context: ?*anyopaque, _: c.LibRaw_progress, _: c_int, _: c_int) call
     return @intFromBool(flag.load(.acquire));
 }
 
+fn parallelProgress(context: ?*anyopaque, stage: c.LibRaw_progress, iteration: c_int, expected: c_int) callconv(.c) c_int {
+    // LibRaw 0.22.2's AHD threads read a shared stop flag that the callback
+    // can set without synchronization. Cancel at the next stage boundary.
+    if (stage == c.LIBRAW_PROGRESS_INTERPOLATE) return 0;
+    return progress(context, stage, iteration, expected);
+}
+
 fn readError(context: ?*anyopaque, _: [*c]const u8, _: i64) callconv(.c) void {
     const failure: *ReadFailure = @ptrCast(@alignCast(context.?));
     failure.store(true, .release);
@@ -99,27 +106,48 @@ pub const Options = struct {
 // libraw_r uses OpenMP on some builds. Limit this worker's OpenMP tasks
 // while LibRaw runs. The setting belongs to the calling thread's task.
 const ThreadBudget = struct {
-    set: *const fn (c_int) callconv(.c) void,
-    previous: c_int,
+    const Set = *const fn (c_int) callconv(.c) void;
+    const Get = *const fn () callconv(.c) c_int;
+    const Setting = struct {
+        set: Set,
+        previous: c_int,
+    };
+    threads: Setting,
+    blocktime: ?Setting,
+
+    fn setScoped(getter: [*:0]const u8, setter: [*:0]const u8, value: c_int) ?Setting {
+        const get: Get = @ptrCast(@alignCast(c.dlsym(c.RTLD_DEFAULT, getter) orelse return null));
+        const set: Set = @ptrCast(@alignCast(c.dlsym(c.RTLD_DEFAULT, setter) orelse return null));
+        const previous = get();
+        set(value);
+        return .{ .set = set, .previous = previous };
+    }
 
     fn begin(workers: usize) ?ThreadBudget {
-        if (@import("builtin").os.tag != .linux) return null;
-        const get: *const fn () callconv(.c) c_int = @ptrCast(c.dlsym(c.RTLD_DEFAULT, "omp_get_max_threads") orelse return null);
-        const set: *const fn (c_int) callconv(.c) void = @ptrCast(c.dlsym(c.RTLD_DEFAULT, "omp_set_num_threads") orelse return null);
-        const previous = get();
-        set(@intCast(@min(std.math.maxInt(c_int), @max(1, workers))));
-        return .{ .set = set, .previous = previous };
+        const threads = setScoped("omp_get_max_threads", "omp_set_num_threads", @intCast(@min(std.math.maxInt(c_int), @max(1, workers)))) orelse return null;
+        // LLVM OpenMP can otherwise spin after a batch ends.
+        return .{ .threads = threads, .blocktime = setScoped("kmp_get_blocktime", "kmp_set_blocktime", 0) };
+    }
+
+    fn end(self: ThreadBudget) void {
+        if (self.blocktime) |setting| setting.set(setting.previous);
+        self.threads.set(self.threads.previous);
     }
 };
 
 pub fn load(file: source.Open, allocator: std.mem.Allocator, options: Options, comptime reserve: anytype, comptime release: anytype) Error!Decoded {
-    const budget = ThreadBudget.begin(options.workers);
-    defer if (budget) |scope| scope.set(scope.previous);
     var read_failure: ReadFailure = .init(false);
     const session = try Session.open(file, options.cancel, &read_failure);
     defer session.close();
     const size = try Extent.init(session.raw.sizes.width, session.raw.sizes.height);
     const sensor = try Extent.init(session.raw.sizes.raw_width, session.raw.sizes.raw_height);
+    // A small RAW has at most one tile of demosaic work.
+    const workers = if (sensor.width <= 256 and sensor.height <= 256) 1 else options.workers;
+    const budget = ThreadBudget.begin(workers);
+    defer if (budget) |scope| scope.end();
+    if (budget != null and workers > 1) {
+        if (options.cancel) |flag| c.libraw_set_progress_handler(session.raw, parallelProgress, @constCast(flag));
+    }
     // Account for native unpacking, demosaic scratch and the processed bitmap.
     const workspace = try sensor.bytes(32, 1);
     const reserve_bytes = std.math.add(usize, workspace, try size.bytes(8, 1)) catch return error.SizeOverflow;
@@ -146,6 +174,10 @@ pub fn load(file: source.Open, allocator: std.mem.Allocator, options: Options, c
     const prefix = (std.math.add(usize, options.prefix_bytes, 63) catch return error.SizeOverflow) & ~@as(usize, 63);
     const total = std.math.add(usize, prefix, pixel_bytes) catch return error.SizeOverflow;
     if (total > std.math.maxInt(isize)) return error.SizeOverflow;
+    try cancelled(options.cancel);
+    // The exported bitmap owns its RGB samples. Drop the development buffer
+    // before allocating the viewer's RGBA pixels.
+    c.libraw_free_image(session.raw);
     const slab = allocator.alignedAlloc(u8, .fromByteUnits(64), total) catch return error.OutOfMemory;
     errdefer allocator.free(slab);
     const pixels = slab[prefix..];

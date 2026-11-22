@@ -93,6 +93,7 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
     var iterations: usize = 64;
     var nearest = false;
     var checksum_surface = false;
+    var checksum_pixels = false;
     var dump_prefix: ?[]const u8 = null;
     var i: usize = 3;
     while (i < @as(usize, @intCast(argc))) : (i += 1) {
@@ -107,7 +108,7 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
             const value = try std.fmt.parseInt(u32, std.mem.span(argv[i]), 10);
             if (value == 0) return error.Usage;
             if (std.mem.eql(u8, arg, "--width")) width = value else if (std.mem.eql(u8, arg, "--height")) height = value else iterations = value;
-        } else if (std.mem.eql(u8, arg, "--nearest")) nearest = true else if (std.mem.eql(u8, arg, "--checksum-surface")) checksum_surface = true else if (std.mem.eql(u8, arg, "--native-predictor")) options.simd_predictor = false else if (std.mem.eql(u8, arg, "--simd-predictor")) options.simd_predictor = true else if (std.mem.eql(u8, arg, "--poison-free")) options.raw_retirement = false else if (std.mem.eql(u8, arg, "--dynamic")) options.dynamic = true else if (std.mem.eql(u8, arg, "--static")) options.dynamic = false else if (std.mem.eql(u8, arg, "--no-cache")) options.no_cache = true else if (std.mem.eql(u8, arg, "--poison")) options.poison_allocation = true else if (std.mem.eql(u8, arg, "--workers")) {
+        } else if (std.mem.eql(u8, arg, "--nearest")) nearest = true else if (std.mem.eql(u8, arg, "--checksum")) checksum_pixels = true else if (std.mem.eql(u8, arg, "--checksum-surface")) checksum_surface = true else if (std.mem.eql(u8, arg, "--native-predictor")) options.simd_predictor = false else if (std.mem.eql(u8, arg, "--simd-predictor")) options.simd_predictor = true else if (std.mem.eql(u8, arg, "--poison-free")) options.raw_retirement = false else if (std.mem.eql(u8, arg, "--dynamic")) options.dynamic = true else if (std.mem.eql(u8, arg, "--static")) options.dynamic = false else if (std.mem.eql(u8, arg, "--no-cache")) options.no_cache = true else if (std.mem.eql(u8, arg, "--poison")) options.poison_allocation = true else if (std.mem.eql(u8, arg, "--workers")) {
             i += 1;
             if (i >= argc) return error.Usage;
             options.workers = try std.fmt.parseInt(usize, std.mem.span(argv[i]), 10);
@@ -119,10 +120,17 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
     if (std.mem.eql(u8, mode, "load")) {
         var counted = std.testing.FailingAllocator.init(std.heap.c_allocator, .{});
         const elapsed = measure: {
+            const before = usage();
             const started = n.now();
             const image = try decoder.loadWithLimits(std.mem.span(argv[2]), 0, counted.allocator(), .{ .raw_retirement = true, .tiff_workers = options.workers });
             const elapsed = (n.now() - started) * 1000;
             defer image.destroy();
+            const after = usage();
+            output("{{\"mode\":\"resources\",\"user_ms\":{d:.3},\"system_ms\":{d:.3},\"peak_rss_bytes\":{d}}}\n", .{ cpuMs(after.ru_utime) - cpuMs(before.ru_utime), cpuMs(after.ru_stime) - cpuMs(before.ru_stime), after.ru_maxrss });
+            if (checksum_pixels) {
+                const pixels = image.ownedPixels() orelse return error.NoOwnedPixels;
+                output("{{\"mode\":\"checksum\",\"checksum\":{d}}}\n", .{std.hash.XxHash64.hash(0, pixels)});
+            }
             if (dump_prefix) |prefix| try dumpRgba(image.native, prefix, 0);
             output("{{\"mode\":\"image\",\"width\":{d},\"height\":{d},\"bits\":{d},\"backend\":\"{s}\"}}\n", .{ image.width, image.height, image.bits_per_component, @tagName(image.backend) });
             break :measure elapsed;
@@ -212,7 +220,7 @@ fn run(argc: c_int, argv: [*][*:0]const u8) !void {
 pub export fn main(argc: c_int, argv: [*][*:0]const u8) c_int {
     run(argc, argv) catch |err| {
         n.output(2, @errorName(err));
-        n.output(2, "\nUsage: yekk-bench-image read|load|decode|verify|render|pan|zoom|zoom-sweep|fit-return FILE [--no-cache] [--workers N] [--poison] [--poison-free] [--dynamic] [--native-predictor] [--width N --height N --iterations N] [--nearest] [--checksum-surface] [--dump-rgba PREFIX]\n");
+        n.output(2, "\nUsage: yekk-bench-image read|load|decode|verify|render|pan|zoom|zoom-sweep|fit-return FILE [--no-cache] [--workers N] [--poison] [--poison-free] [--dynamic] [--native-predictor] [--width N --height N --iterations N] [--nearest] [--checksum] [--checksum-surface] [--dump-rgba PREFIX]\n");
         return 1;
     };
     return 0;

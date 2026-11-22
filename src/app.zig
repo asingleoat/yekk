@@ -832,7 +832,8 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
     const path = (entry(id) orelse return false).path;
     // Extension is a scheduling hint only; content still selects the decoder.
     const ext = std.fs.path.extension(path);
-    const is_parallel = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff") or std.ascii.eqlIgnoreCase(ext, ".jxl");
+    const is_parallel = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff") or std.ascii.eqlIgnoreCase(ext, ".jxl") or
+        (@import("builtin").cpu.arch == .aarch64 and @import("source").rawCandidate(path));
     const workers: usize = @intCast(@min(available, if (is_parallel) (if (prefetch) @max(1, control.decode_worker_budget / 2) else control.decode_worker_budget) else 1));
     var edge: u32 = 0;
     if (s.pressure == .critical) {

@@ -68,7 +68,12 @@ pub fn loadWithLimits(path: []const u8, max_pixel: u32, allocator: std.mem.Alloc
     if (source_format == .raw) {
         const space = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse return error.OutOfMemory;
         defer n.CFRelease(space);
-        const decoded = try raw.load(opened, allocator, .{ .prefix_bytes = @sizeOf(Image), .raw_retirement = limits.raw_retirement, .cancel = limits.cancel }, reservePhoto, releasePhoto);
+        const decoded = try raw.load(opened, allocator, .{
+            .prefix_bytes = @sizeOf(Image),
+            .workers = if (limits.tiff_workers == 0) n.performanceCores() else limits.tiff_workers,
+            .raw_retirement = limits.raw_retirement,
+            .cancel = limits.cancel,
+        }, reservePhoto, releasePhoto);
         return @import("tiff_decoder.zig").fromDecoded(decoded, space, .raw);
     }
     if (source_format == .tiff and max_pixel == 0) if (try @import("tiff_decoder.zig").load(path, allocator, limits)) |decoded| return decoded;

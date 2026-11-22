@@ -29,6 +29,15 @@
             'zig_args.appendAssumeCapacity(try arena.dupe(u8, dynamic_linker_path));'
         '';
       });
+      librawFor = pkgs:
+        if pkgs.stdenv.hostPlatform.isDarwin && pkgs.stdenv.hostPlatform.isAarch64 then
+          pkgs.libraw.overrideAttrs (old: {
+            buildInputs = (old.buildInputs or []) ++ [ pkgs.llvmPackages.openmp ];
+            # Upstream exposes a flag to opt into OpenMP on Apple Clang.
+            env = (old.env or {}) // { NIX_CFLAGS_COMPILE = "-DLIBRAW_FORCE_OPENMP"; };
+            configureFlags = (old.configureFlags or []) ++ [ "--enable-openmp" ];
+          })
+        else pkgs.libraw;
       linuxLibc = pkgs: pkgs.runCommand "yekk-libc.conf" {
         nativeBuildInputs = [ pkgs.stdenv.cc ];
       } ''
@@ -63,7 +72,7 @@
               ];
             };
             nativeBuildInputs = [ (zigFor system) ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.pkg-config pkgs.makeWrapper pkgs.desktop-file-utils ];
-            buildInputs = [ pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo pkgs.libjxl pkgs.libraw ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
+            buildInputs = [ pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo pkgs.libjxl (librawFor pkgs) ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes ]);
             YEKK_TIFF_LIB = "${pkgs.lib.getLib pkgs.libtiff}/lib";
             YEKK_TIFF_INCLUDE = "${pkgs.lib.getDev pkgs.libtiff}/include";
             YEKK_DEFLATE_INCLUDE = "${pkgs.lib.getDev pkgs.libdeflate}/include";
@@ -72,8 +81,8 @@
             YEKK_JPEG_LIB = "${pkgs.lib.getLib pkgs.libjpeg_turbo}/lib";
             YEKK_JXL_INCLUDE = "${pkgs.lib.getDev pkgs.libjxl}/include";
             YEKK_JXL_LIB = "${pkgs.lib.getLib pkgs.libjxl}/lib";
-            YEKK_RAW_INCLUDE = "${pkgs.lib.getDev pkgs.libraw}/include";
-            YEKK_RAW_LIB = "${pkgs.lib.getLib pkgs.libraw}/lib";
+            YEKK_RAW_INCLUDE = "${pkgs.lib.getDev (librawFor pkgs)}/include";
+            YEKK_RAW_LIB = "${pkgs.lib.getLib (librawFor pkgs)}/lib";
             YEKK_ZLIB_INCLUDE = "${pkgs.lib.getDev pkgs.zlib}/include";
             YEKK_ZLIB_LIB = "${pkgs.lib.getLib pkgs.zlib}/lib";
             SDKROOT = if pkgs.stdenv.hostPlatform.isDarwin then "${pkgs.apple-sdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" else "";
@@ -166,7 +175,7 @@
       devShells = eachSystem (system:
         let pkgs = pkgsFor system; in {
           default = pkgs.mkShell {
-            packages = [ (zigFor system) pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo pkgs.libjxl pkgs.libraw pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
+            packages = [ (zigFor system) pkgs.libtiff pkgs.libdeflate pkgs.zlib pkgs.libjpeg_turbo pkgs.libjxl (librawFor pkgs) pkgs.python3 ] ++ (if pkgs.stdenv.hostPlatform.isDarwin then [ pkgs.apple-sdk ] else [ pkgs.pkg-config pkgs.sdl3 pkgs.vips pkgs.lcms2 pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes pkgs.shared-mime-info pkgs.procps pkgs.dbus pkgs.xorg-server pkgs.xdotool pkgs.zenity pkgs.weston pkgs.openbox pkgs.xdg-desktop-portal pkgs.xdg-desktop-portal-gtk pkgs.patchelf pkgs.binutils pkgs.strace pkgs.bubblewrap ]);
             YEKK_TEST_PORTAL = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal}" else "";
             YEKK_TEST_PORTAL_GTK = if pkgs.stdenv.hostPlatform.isLinux then "${pkgs.xdg-desktop-portal-gtk}" else "";
             YEKK_LINUX_LOADER = if pkgs.stdenv.hostPlatform.isLinux then pkgs.stdenv.cc.bintools.dynamicLinker else "";
@@ -184,8 +193,8 @@
             YEKK_JPEG_LIB = "${pkgs.lib.getLib pkgs.libjpeg_turbo}/lib";
             YEKK_JXL_INCLUDE = "${pkgs.lib.getDev pkgs.libjxl}/include";
             YEKK_JXL_LIB = "${pkgs.lib.getLib pkgs.libjxl}/lib";
-            YEKK_RAW_INCLUDE = "${pkgs.lib.getDev pkgs.libraw}/include";
-            YEKK_RAW_LIB = "${pkgs.lib.getLib pkgs.libraw}/lib";
+            YEKK_RAW_INCLUDE = "${pkgs.lib.getDev (librawFor pkgs)}/include";
+            YEKK_RAW_LIB = "${pkgs.lib.getLib (librawFor pkgs)}/lib";
             YEKK_ZLIB_INCLUDE = "${pkgs.lib.getDev pkgs.zlib}/include";
             YEKK_ZLIB_LIB = "${pkgs.lib.getLib pkgs.zlib}/lib";
             shellHook = ''

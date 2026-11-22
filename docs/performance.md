@@ -88,8 +88,10 @@ truncated streams. ImageIO accepted truncated examples in local checks.
 LibRaw unpacks the sensor samples and develops them into a 16-bit sRGB image.
 Development uses camera white balance when available. It includes demosaicing,
 which estimates the missing color channels at each sensor pixel. The viewer
-caches the developed image at full resolution. On Linux, LibRaw's OpenMP
-worker count follows the viewer decode budget.
+caches the developed image at full resolution. On Linux and Apple Silicon,
+LibRaw uses OpenMP to run parts of development on multiple CPU cores. These
+workers share the viewer decode budget. The viewer releases LibRaw's
+development buffer before it allocates the cached image.
 
 Measure unpacking and development separately when comparing RAW decoders.
 Replacing the unpacker can only reduce the first cost. Use the same camera
