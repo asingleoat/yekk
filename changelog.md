@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.6 — 2026-11-24
+
+- Add feh-compatible list output, image decode checks, sort options, and
+  filters for image width and height. Load feh themes and mouse bindings.
+- Press **Shift+L** to save the current image list. Open the saved list with
+  `-f FILE`.
+- Set window titles and fonts. View and edit captions in separate text files.
+  Show EXIF data or command output over an image.
+- Open images in separate windows. Create and export contact sheets, and show
+  thumbnails as they load. Click a thumbnail to open the image or run the
+  configured action.
+- Save a rotated or mirrored copy at full resolution. Use `--edit` to rotate
+  or mirror JPEGs in place when the operation can keep every pixel.
+- Navigate with terminal keys or signals. Set the desktop wallpaper on macOS
+  or through the Wallpaper portal on Linux.
+
+HTTP and HTTPS image URLs remain unsupported.
+
 ## 0.2.5 — 2026-11-21
 
 - Load camera RAW files faster on Apple Silicon. Write directly to the final

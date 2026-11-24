@@ -86,7 +86,7 @@
           default = yekk;
           yekk = pkgs.stdenvNoCC.mkDerivation {
             pname = "yekk";
-            version = "0.2.5";
+            version = "0.2.6";
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
