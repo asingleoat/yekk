@@ -27,6 +27,7 @@ pub const Options = struct {
     buttons: ?[:0]const u8 = null,
     hook_test: bool = false,
     filelist: ?[:0]const u8 = null,
+    output_dir: ?[:0]const u8 = null,
     reload_seconds: ?f64 = null,
 
     fit: ?core.ScaleMode = null,
@@ -114,6 +115,9 @@ pub const Options = struct {
             self.buttons = value;
         } else if (std.mem.eql(u8, name, "filelist")) {
             self.filelist = value;
+        } else if (std.mem.eql(u8, name, "output-dir")) {
+            if (value.len == 0) return error.EmptyOutputDirectory;
+            self.output_dir = value;
         } else if (std.mem.eql(u8, name, "start-at")) {
             listing.start_at = value;
         } else if (std.mem.eql(u8, name, "on-last-slide")) {

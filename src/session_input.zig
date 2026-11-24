@@ -186,7 +186,10 @@ fn defaultPath(buffer: []u8, name: []const u8) !?[:0]const u8 {
     if (c.getenv("HOME")) |value| return try std.fmt.bufPrintSentinel(buffer, "{s}/.config/yekk/{s}", .{ std.mem.span(value), name }, 0);
     return null;
 }
-pub fn filelist(path: [:0]const u8, data: []u8, paths: [][:0]const u8, count: *usize, cancel: ?*const std.atomic.Value(bool)) !void {
+// Every path in a catalog takes one separator byte, both in memory and on disk.
+pub const FilelistBytes = [catalog.path_capacity + 1]u8;
+
+pub fn filelist(path: [:0]const u8, data: *FilelistBytes, paths: [][:0]const u8, count: *usize, cancel: ?*const std.atomic.Value(bool)) !void {
     const bytes = if (std.mem.eql(u8, path, "-")) stdin: {
         var used: usize = 0;
         while (used < data.len) {
@@ -231,41 +234,64 @@ pub fn writeAll(fd: c_int, bytes: []const u8) !void {
         used += @intCast(count);
     }
 }
-/// A borrowed catalog view validated for the line-list format. The catalog and
-/// order remain immutable until writing finishes. Construction performs no I/O.
-const LineList = struct {
+const Entries = struct {
     entries: []const catalog.Entry,
-    order: ?[]const usize,
+    order: ?[]const usize = null,
 
-    fn init(entries: []const catalog.Entry, order: ?[]const usize) !LineList {
-        const list: LineList = .{ .entries = entries, .order = order };
-        for (0..list.len()) |index| {
-            const id = if (order) |ids| ids[index] else index;
-            if (id >= entries.len) return error.InvalidFilelistOrder;
-            const name = entries[id].path;
-            if (std.mem.indexOfScalar(u8, name, '\n') != null or std.mem.endsWith(u8, name, "\r")) return error.UnrepresentableFilelistPath;
-        }
-        return list;
-    }
-    fn len(self: LineList) usize {
+    fn len(self: Entries) usize {
         return if (self.order) |ids| ids.len else self.entries.len;
     }
-    fn path(self: LineList, index: usize) [:0]const u8 {
+    fn path(self: Entries, index: usize) [:0]const u8 {
         return self.entries[if (self.order) |ids| ids[index] else index].path;
     }
 };
-fn writeList(fd: c_int, list: LineList) !void {
-    for (0..list.len()) |index| {
-        try writeAll(fd, list.path(index));
-        try writeAll(fd, "\n");
+
+/// A borrowed view, checked before opening a file for writing.
+const LineList = union(enum) {
+    catalog: Entries,
+    paths: []const [:0]const u8,
+
+    fn len(self: LineList) usize {
+        return switch (self) {
+            .catalog => |entries| entries.len(),
+            .paths => |paths| paths.len,
+        };
     }
-}
+    fn path(self: LineList, index: usize) [:0]const u8 {
+        return switch (self) {
+            .catalog => |entries| entries.path(index),
+            .paths => |paths| paths[index],
+        };
+    }
+    fn checked(self: LineList) !LineList {
+        if (self == .catalog) if (self.catalog.order) |order| for (order) |id| {
+            if (id >= self.catalog.entries.len) return error.InvalidFilelistOrder;
+        };
+        for (0..self.len()) |index| {
+            const name = self.path(index);
+            if (std.mem.indexOfScalar(u8, name, '\n') != null or std.mem.endsWith(u8, name, "\r")) return error.UnrepresentableFilelistPath;
+        }
+        return self;
+    }
+    fn write(self: LineList, fd: c_int) !void {
+        for (0..self.len()) |index| {
+            try writeAll(fd, self.path(index));
+            try writeAll(fd, "\n");
+        }
+    }
+};
+
 pub fn writeEntries(fd: c_int, entries: []const catalog.Entry, order: ?[]const usize) !void {
-    try writeList(fd, try .init(entries, order));
+    const list = try (LineList{ .catalog = .{ .entries = entries, .order = order } }).checked();
+    try list.write(fd);
 }
 pub fn save(path: [:0]const u8, entries: []const catalog.Entry, order: ?[]const usize) !void {
     if (std.mem.eql(u8, path, "-")) return;
-    const list = try LineList.init(entries, order);
+    const list = try (LineList{ .catalog = .{ .entries = entries, .order = order } }).checked();
+    try saveList(path, list, .replace);
+}
+
+fn saveList(path: [:0]const u8, list: LineList, mode: enum { replace, create }) !void {
     var buffer: [4096]u8 = undefined;
     const temporary = try std.fmt.bufPrintSentinel(&buffer, "{s}.yekk-XXXXXX", .{path}, 0);
     const fd = c.mkstemp(temporary.ptr);
@@ -275,11 +301,84 @@ pub fn save(path: [:0]const u8, entries: []const catalog.Entry, order: ?[]const 
         _ = c.close(fd);
     };
     defer _ = c.unlink(temporary.ptr);
-    var stat: c.struct_stat = undefined;
-    if (files.stat(path.ptr, &stat) == 0 and c.fchmod(fd, stat.st_mode & 0o777) != 0) return error.FilelistWriteFailed;
-    try writeList(fd, list);
+    if (mode == .replace) {
+        var stat: c.struct_stat = undefined;
+        if (files.stat(path.ptr, &stat) == 0 and c.fchmod(fd, stat.st_mode & 0o777) != 0) return error.FilelistWriteFailed;
+    }
+    try list.write(fd);
     if (c.fsync(fd) != 0) return error.FilelistWriteFailed;
     const status = c.close(fd);
     open = false;
-    if (status != 0 or c.rename(temporary.ptr, path.ptr) != 0) return error.FilelistWriteFailed;
+    if (status != 0) return error.FilelistWriteFailed;
+
+    const published = if (mode == .replace)
+        c.rename(temporary.ptr, path.ptr)
+    else if (runtime.darwin)
+        c.renamex_np(temporary.ptr, path.ptr, c.RENAME_EXCL)
+    else
+        c.renameat2(c.AT_FDCWD, temporary.ptr, c.AT_FDCWD, path.ptr, c.RENAME_NOREPLACE);
+    if (published == 0) return;
+    if (mode == .create and runtime.errno().* == c.EEXIST) return error.FilelistNameTaken;
+    return error.FilelistWriteFailed;
 }
+
+var export_number: std.atomic.Value(usize) = .init(1);
+fn saveExport(buffer: []u8, directory: [:0]const u8, paths: []const [:0]const u8) ![:0]const u8 {
+    const list = try (LineList{ .paths = paths }).checked();
+    while (true) {
+        const number = export_number.fetchAdd(1, .monotonic);
+        const path = try std.fmt.bufPrintSentinel(buffer, "{s}/feh_{d}_{d:0>6}_filelist", .{ directory, c.getpid(), number }, 0);
+        saveList(path, list, .create) catch |err| switch (err) {
+            error.FilelistNameTaken => continue,
+            else => return err,
+        };
+        return path;
+    }
+}
+
+/// The UI captures path slices in display order. The catalog owns the path bytes
+/// until the worker finishes. Reordering or removing entries leaves both intact.
+pub const FilelistExport = struct {
+    const Phase = enum(u8) { idle, pending, done };
+    pub const Result = union(enum) { saved: [:0]const u8, failed: anyerror };
+
+    phase: std.atomic.Value(Phase) = .init(.idle),
+    paths: [catalog.capacity][:0]const u8 = undefined,
+    count: usize = 0,
+    name: [4096]u8 = undefined,
+    result: Result = undefined,
+
+    pub fn busy(self: *const FilelistExport) bool {
+        return self.phase.load(.acquire) != .idle;
+    }
+
+    pub fn queue(self: *FilelistExport, entries: []const catalog.Entry, order: ?[]const usize) bool {
+        if (self.busy()) return false;
+        const source: Entries = .{ .entries = entries, .order = order };
+        self.count = source.len();
+        for (self.paths[0..self.count], 0..) |*path, index| path.* = source.path(index);
+        self.phase.store(.pending, .release);
+        return true;
+    }
+
+    pub fn runPending(self: *FilelistExport, directory: [:0]const u8) bool {
+        if (self.phase.load(.acquire) != .pending) return false;
+        self.result = if (saveExport(&self.name, directory, self.paths[0..self.count])) |path|
+            .{ .saved = path }
+        else |err| failed: {
+            var diagnostic: [128]u8 = undefined;
+            runtime.output(2, std.fmt.bufPrint(&diagnostic, "yekk: could not save file list: {s}\n", .{@errorName(err)}) catch "yekk: could not save file list\n");
+            break :failed .{ .failed = err };
+        };
+        self.phase.store(.done, .release);
+        return true;
+    }
+
+    /// The result is valid until the UI queues another save.
+    pub fn take(self: *FilelistExport) ?Result {
+        if (self.phase.load(.acquire) != .done) return null;
+        const result = self.result;
+        self.phase.store(.idle, .release);
+        return result;
+    }
+};

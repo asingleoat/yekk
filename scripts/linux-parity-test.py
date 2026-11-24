@@ -159,6 +159,18 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
     result = check("remove edits the filelist without deleting sources", ["-f", listing, "--trace-events", "--test-keys", "Delete"], gui=True)
     assert listing.read_text() == f"{second}\n" and first.exists() and second.exists()
     assert views(result)[-1]["id"] == "1" and views(result)[-1]["count"] == "1"
+    export_dir = folder / "save here"
+    export_dir.mkdir()
+    check("save active filelist from a regular session", [
+        "-j", export_dir, "--test-keys", "Delete,L", first, second,
+    ], gui=True)
+    [exported] = export_dir.glob("feh_*_000001_filelist")
+    assert exported.read_text() == f"{second}\n" and first.exists() and second.exists()
+    assert check("reopen exported filelist", ["-f", exported, "--print-filelist"]).stdout == f"{second}\n"
+    result = check("failed filelist export reports the error and leaves the viewer usable", [
+        "--output-dir", export_dir / "missing", "--trace-events", "--test-keys", "L,n", first, second,
+    ], gui=True)
+    assert "could not save file list" in result.stderr and views(result)[-1]["id"] == "1"
     listing.write_text(f"{first}\n")
     special = folder / "photo\n雪.png"
     special.symlink_to(root / "tests/fixtures/alpha.content")

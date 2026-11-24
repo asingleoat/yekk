@@ -114,10 +114,16 @@ Empty lines are skipped. Both Unix and Windows line endings are accepted.
 Relative paths are interpreted from Yekk's working directory.
 On close, Yekk saves the remaining image list to that file as absolute paths.
 
+Press **Shift+L** to save the window's current image list as a new text file.
+The file contains one absolute path per line in viewing order. Use
+`-j DIR` or `--output-dir DIR` to choose the destination directory.
+The default is the current working directory. Each save creates a numbered
+`feh_PID_ID_filelist` file. Open it later with `yekk -f FILE`.
+
 Use `-` or `-f -` to read standard input. This input is never written back.
 A missing `-f FILE`, without other image inputs, starts with the current directory.
 
-Text input is limited to 1 MiB. An image list accepts at most 16,384 entries
+Text input is limited to 8 MiB. An image list accepts at most 16,384 entries
 and 8 MiB of stored path text.
 Names containing a line feed or trailing carriage return cannot be saved in this
 format. Yekk rejects them before replacing the file. Other save errors return a
@@ -257,6 +263,7 @@ Hold an arrow key to repeat navigation or zoom at the system repeat rate.
 | i / ? | Show image information / key bindings. |
 | Delete | Remove the image from the list without deleting the file. |
 | Ctrl + Delete | Request confirmation before moving the file to Trash. |
+| Shift + L | Save the current image list. |
 | m / right click | Open the action menu. |
 | Left drag / click | Pan / next image. |
 | Middle drag / click | Zoom / actual size. |
@@ -301,6 +308,7 @@ next_img space Right
 prev_img BackSpace Left
 jump_first Home
 jump_last End
+save_filelist L
 ```
 
 Use `-T NAME` or `--theme NAME` to load a named theme from a feh

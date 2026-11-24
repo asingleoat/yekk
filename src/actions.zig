@@ -65,6 +65,7 @@ pub const Action = enum {
     nearest,
     background,
     resize_window,
+    save_filelist,
 };
 pub const Binding = struct { key: u16, modifiers: usize = 0, action: Action };
 pub const command: usize = 1 << 20;
@@ -105,6 +106,7 @@ pub const defaults = [_]Binding{
     .{ .key = '7', .action = .action_7 },                              .{ .key = '8', .action = .action_8 },
     .{ .key = '9', .action = .action_9 },                              .{ .key = 'w', .modifiers = command, .action = .close },
     .{ .key = 'q', .modifiers = command, .action = .quit },            .{ .key = 'o', .modifiers = command, .action = .open },
+    .{ .key = 'l', .modifiers = shift, .action = .save_filelist },
 };
 pub const MouseAction = union(enum) {
     pan,

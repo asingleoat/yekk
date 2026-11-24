@@ -87,10 +87,20 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     assert cli("-L%n", "-A", "printf 'action: %%s\\n' %F", "orientation6.jpg", "alpha.png") == (
         "action: orientation6.jpg\naction: alpha.png\norientation6.jpg\nalpha.png\n"
     )
+    # A list that fits in the catalog can exceed the former 1 MiB input limit.
+    long_path = work / ('a' * 220 + '.png')
+    long_path.write_bytes(valid_png.read_bytes())
+    large_list = work / 'large-list'
+    large_text = f"{long_path}\n" * 5000
+    assert len(large_text) > 1024 * 1024
+    large_list.write_text(large_text)
+    assert cli("-f", large_list, "--print-filelist") == large_text
     if "--headless" in sys.argv[1:]:
         print("feh listing, catalog and theme checks passed")
         raise SystemExit(0)
-    output = gui('-xg960x640-0+0', '--hook-test', '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
+    out = work / 'save here'
+    out.mkdir()
+    output = gui('-xg960x640-0+0', '--hook-test', '--output-dir', out, '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
                  '--action2=;[Inspect]printf inspect >> "$LOG"', '--action3=exit 7', '--action4=sleep 0.2; test -f %F',
                  '--action5=sleep 0.2; mv %F "$DISCARD/"', '--action7=echo %f', '--action8=cat %L > "$MANIFEST"', *paths)
     assert 'HOOK_TEST_PASSED' in output, output
@@ -106,6 +116,10 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     assert (work / 'keep' / paths[1].name).is_symlink() and original.is_file()
     assert paths[2].is_file() and (work / 'manifest').read_text() == str(paths[2]) + '\n'
     assert (work / 'session-list').read_text() == str(paths[2]) + '\n'
+    initial_export, final_export = sorted(out.glob('feh_*_filelist'))
+    assert initial_export.name.endswith('_000001_filelist') and final_export.name.endswith('_000002_filelist')
+    assert initial_export.read_text() == f"{paths[0]}\n{paths[2]}\n"
+    assert final_export.read_text() == f"{paths[2]}\n"
     assert cli('--print-filelist', cwd=work / 'images').strip() == str(paths[2])
     # An argument-free input set must start a single cwd session, including
     # when other options are supplied. The supervisor guards process creation.

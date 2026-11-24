@@ -140,7 +140,6 @@ const State = struct {
     catalog: catalog.Catalog = .{},
     input: [catalog.capacity][:0]const u8 = undefined,
     input_count: usize = 0,
-    filelist_data: [1024 * 1024]u8 = undefined,
     initial: [1]Entry = undefined,
     entries: []Entry = &.{},
     positions: [catalog.capacity]usize = @splat(std.math.maxInt(usize)),
@@ -187,6 +186,7 @@ const State = struct {
     hook: HookJob = .{},
     hook_paths: [catalog.capacity][:0]const u8 = undefined,
     selection_revision: u64 = 0,
+    filelist_export: input.FilelistExport = .{},
     filelist_saving: bool = false,
     filelist_saved: bool = false,
     filelist_failure: ?anyerror = null,
@@ -293,11 +293,13 @@ const Control = struct {
     allow_prefetch: bool = true,
     memory_recovering: bool = false,
     config_override: ?[:0]const u8 = null,
+    output_dir: [:0]const u8 = ".",
 };
 const Root = struct {
     sessions: [sessions.capacity]State,
     control: Control,
     renderer: presentation.Renderer,
+    filelist_data: input.FilelistBytes,
 };
 var root: *Root = undefined;
 var control: *Control = undefined;
@@ -310,7 +312,6 @@ fn initState(state: *State, slot: usize, limits: decoder.Limits) void {
     inline for (@typeInfo(State).@"struct".field_names) |name| {
         if (comptime !std.mem.eql(u8, name, "catalog") and
             !std.mem.eql(u8, name, "input") and
-            !std.mem.eql(u8, name, "filelist_data") and
             !std.mem.eql(u8, name, "hook_paths") and
             !std.mem.eql(u8, name, "initial") and
             !std.mem.eql(u8, name, "positions") and
@@ -1158,7 +1159,7 @@ fn closePump() void {
     releasePump();
     if (s.close_cursor != s.cached.len or s.release_count != 0 or s.releaser.busy or s.indexing or s.watch.busy or s.aux.busy or s.hook.busy or s.pressure_cancelling or rendersBusy() or s.preview_queued or s.automation_queued or s.status_queued or s.pending_sheets > 0) return;
     for (s.jobs) |job| if (job.busy) return;
-    if (s.filelist_saving) return;
+    if (s.filelist_saving or s.filelist_export.busy()) return;
     if (!s.filelist_saved and s.cli.filelist != null and !std.mem.eql(u8, s.cli.filelist.?, "-") and s.indexed and s.index_failure == null) {
         s.filelist_saving = true;
         n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, saveFilelistWorker);
@@ -1835,6 +1836,7 @@ fn perform(action: Action) void {
             removeEntry(id);
         },
         .trash => confirmTrash(),
+        .save_filelist => exportFilelist(),
         .resize_window => if (s.current) |image| {
             const size = sourceSize(image);
             const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
@@ -1943,6 +1945,7 @@ fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
         }
         return;
     }
+    if (repeated and action == .save_filelist) return;
     if (!repeated) stopHeldAdvance();
     if (key == 0x1B) {
         if (s.show_help or s.show_info) {
@@ -2296,7 +2299,7 @@ fn automation() void {
     n.dispatch_async_f(n.dispatch_get_main_queue(), s, automated);
 }
 fn automationReady() bool {
-    if (control.memory_recovering or (rendersBusy() and !s.cli.benchmark_pan) or (s.render_wanted != null and s.render_presented_revision != s.render_revision and s.render_failed_revision != s.render_revision) or s.indexing or !s.indexed or s.closing or s.releaser.busy or s.release_count > 0 or s.aux.busy or s.hook.busy or s.pending_sheets > 0) return false;
+    if (control.memory_recovering or (rendersBusy() and !s.cli.benchmark_pan) or (s.render_wanted != null and s.render_presented_revision != s.render_revision and s.render_failed_revision != s.render_revision) or s.indexing or !s.indexed or s.closing or s.releaser.busy or s.release_count > 0 or s.aux.busy or s.hook.busy or s.filelist_export.busy() or s.pending_sheets > 0) return false;
     if (!s.cli.benchmark_pan and control.speculative_renders != 0) return false;
     for (s.jobs) |job| if (job.busy and !(s.cli.benchmark_pan and job.prefetch and s.current != null and s.displayed == s.desired)) return false;
     if (s.desired) |id| {
@@ -2738,6 +2741,7 @@ fn hookTest() void {
             }
             s.smoke_failed = s.smoke_failed or s.desired != s.entries[1].id;
             s.smoke_count = s.cached[s.desired.?].version;
+            if (s.cli.output_dir != null) smokeKey("L", actions.shift);
             smokeKey("2", 0);
         },
         3 => {
@@ -2764,6 +2768,7 @@ fn hookTest() void {
         },
         else => {
             s.smoke_failed = s.smoke_failed or !s.hook.result.success() or s.hook.failure != null;
+            if (s.cli.output_dir != null) smokeKey("L", actions.shift);
             n.output(if (s.smoke_failed) 2 else 1, if (s.smoke_failed) "HOOK_TEST_FAILED\n" else "HOOK_TEST_PASSED\n");
             close();
             return;
@@ -2777,6 +2782,7 @@ fn parseOption(item: options.Item) !void {
     if (try s.cli.parse(item, &s.options)) {
         if (s.cli.decode_workers) |workers| control.decode_worker_budget = if (workers == 0) n.performanceCores() else workers;
         if (s.cli.config) |path| control.config_override = path;
+        if (s.cli.output_dir) |path| control.output_dir = path;
         memory.report = memory.report or s.cli.allocation_stats;
         return;
     }
@@ -2814,6 +2820,32 @@ fn parseOption(item: options.Item) !void {
         s.snapshot_path = value;
     } else return error.UnknownOption;
 }
+fn exportFilelist() void {
+    if (s.closing) return;
+    if (!s.indexed or s.index_failure != null or s.entries.len == 0) {
+        notice("No image list to save", .{});
+        return;
+    }
+    if (!s.filelist_export.queue(s.entries, null)) return;
+    n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, exportFilelistWorker);
+}
+fn exportFilelistWorker(context: ?*anyopaque) callconv(.c) void {
+    sessionContext(context);
+    _ = s.filelist_export.runPending(control.output_dir);
+    n.dispatch_async_f(n.dispatch_get_main_queue(), s, exportFilelistDone);
+}
+fn exportFilelistDone(context: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    sessionContext(context);
+    const result = s.filelist_export.take().?;
+    if (!s.closing) switch (result) {
+        .saved => |path| notice("Saved file list to {s}", .{std.fs.path.basename(path)}),
+        .failed => |err| notice("Could not save file list ({s})", .{@errorName(err)}),
+    };
+    pump();
+}
+
 fn persistFilelist() !void {
     try input.save(s.cli.filelist.?, s.entries, null);
 }
@@ -2841,7 +2873,7 @@ fn filelistSaved(context: ?*anyopaque) callconv(.c) void {
 
 fn readFilelist() !void {
     const path = s.cli.filelist orelse return;
-    try input.filelist(path, &s.filelist_data, &s.input, &s.input_count, &s.cancel);
+    try input.filelist(path, &root.filelist_data, &s.input, &s.input_count, &s.cancel);
     if (s.input_count == 0) {
         s.input[0] = ".";
         s.input_count = 1;
@@ -2865,6 +2897,7 @@ const usage =
     \\      Use %F for shell-escaped path, %N for basename; %% for literal percent.
     \\  -G, --draw-actions      -d, --draw-filename
     \\  -f, --filelist FILE     - (or -f -) reads paths from stdin
+    \\  -j, --output-dir DIR   Shift+L saves the current file list
     \\  -|, --start-at FILE     --keys FILE           --config FILE
     \\  -l, --list              -L, --customlist FORMAT
     \\  -U, --loadable          -u, --unloadable       --print-filelist

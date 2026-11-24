@@ -203,7 +203,8 @@ const Config = struct {
     listing: @import("cli.zig").Listing = .none,
     formats: bool = false,
     filelist: ?[:0]const u8 = null,
-    filelist_data: [1024 * 1024 + 1]u8 = undefined,
+    output_dir: [:0]const u8 = ".",
+    selection_data: [1024 * 1024 + 1]u8 = undefined,
     geometry: ?@import("geometry").Geometry = null,
     settings: actions.Settings = .{},
     paused: bool = false,
@@ -267,6 +268,7 @@ const State = struct {
     controller: controls.Controller = .{},
     removed: [catalog.capacity]std.atomic.Value(bool) = undefined,
     removal_pending: std.atomic.Value(bool) = .init(false),
+    filelist_export: input.FilelistExport = .{},
     save_failed: std.atomic.Value(bool) = .init(false),
     hook_finished: usize = 0,
     hook_advance: ?usize = null,
@@ -283,7 +285,7 @@ fn output(comptime format: []const u8, args: anytype) void {
     var buffer: [8192]u8 = undefined;
     runtime.output(2, std.fmt.bufPrint(&buffer, format, args) catch "diagnostic too long\n");
 }
-fn parse(state: *State, arguments: input.Arguments) !bool {
+fn parse(state: *State, arguments: input.Arguments, filelist_data: *input.FilelistBytes) !bool {
     const cfg = &state.config;
     var common: @import("cli.zig").Options = .{};
     var config_path: ?[:0]const u8 = null;
@@ -341,6 +343,7 @@ fn parse(state: *State, arguments: input.Arguments) !bool {
     memory.report = memory.report or common.allocation_stats;
     cfg.workers = std.math.cast(c_int, common.decode_workers orelse 0) orelse return error.InvalidWorkerCount;
     cfg.filelist = common.filelist orelse cfg.filelist;
+    cfg.output_dir = common.output_dir orelse ".";
     cfg.fullscreen = common.fullscreen;
     cfg.borderless = common.borderless;
     cfg.geometry = common.geometry;
@@ -356,7 +359,7 @@ fn parse(state: *State, arguments: input.Arguments) !bool {
         cfg.settings.watch = true;
         cfg.settings.watch_seconds = 0.25;
     }
-    if (cfg.filelist) |path| try input.filelist(path, &cfg.filelist_data, &cfg.paths, &cfg.count, &state.stop);
+    if (cfg.filelist) |path| try input.filelist(path, filelist_data, &cfg.paths, &cfg.count, &state.stop);
     if (cfg.count == 0) {
         if (cfg.catalog_options.start_at) |path| {
             cfg.paths[0] = path;
@@ -373,6 +376,7 @@ fn usage() void {
         "-F fullscreen, -g GEOMETRY, -x borderless, -r recursive, -n reverse, -z shuffle,\n" ++
         "-S SORT, --version-sort, --min-dimension WxH, --max-dimension WxH,\n" ++
         "--browse, --start-at PATH, -f FILELIST (- for stdin), -T THEME, --buttons FILE,\n" ++
+        "-j, --output-dir DIR (Shift+L saves the current file list),\n" ++
         "-Z fit, -. shrink, --fit MODE, --zoom PERCENT|max|fill, --zoom-step PERCENT,\n" ++
         "--keep-zoom-vp, --no-wrap, -D SECONDS (negative: paused), --on-last-slide POLICY,\n" ++
         "-R SECONDS, --watch, -A COMMAND, --action1..9 COMMAND, --config FILE, --keys FILE,\n" ++
@@ -470,7 +474,9 @@ fn watchWorker(state: *State) void {
     if (state.context) |context| native.types.bind(context);
     var watch_at: f64 = 0;
     var cursor: usize = 0;
+    defer _ = state.filelist_export.runPending(state.config.output_dir);
     while (!state.stop.load(.acquire)) {
+        if (state.filelist_export.runPending(state.config.output_dir)) native.input.wake();
         if (state.indexed.load(.acquire)) {
             const request = state.getRequest();
             if (request.watch and runtime.now() >= watch_at) {
@@ -1060,6 +1066,7 @@ const Life = struct {
     trace: bool = false,
     workers: c_int = 0,
     catalog_options: catalog.Options = .{},
+    output_dir: [:0]const u8 = ".",
     filename: bool = false,
     draw_actions: bool = false,
     extra_frame: native.Frame = native.Frame{},
@@ -1430,6 +1437,9 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
                     ui.request.checker = !ui.request.checker;
                     effect.changed = true;
                 },
+                .save_filelist => if (!event.repeated) {
+                    _ = state.filelist_export.queue(state.catalog.entries[0..state.catalog.count], state.controller.order[0..state.controller.count]);
+                },
                 .resize_window => {
                     if (ui.base_width > 0) native.window.resizeImage(@intFromFloat(ui.source.width), @intFromFloat(ui.source.height));
                 },
@@ -1537,6 +1547,14 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         ui.request.revision += 1;
         ui.dirty = true;
         ui.notice_text = if (hook_failed) "Command failed (see stderr)" else "Command completed";
+    }
+    if (state.filelist_export.take()) |saved| {
+        ui.notice_text = switch (saved) {
+            .saved => |path| std.fmt.bufPrint(&ui.notice, "Saved file list to {s}", .{std.fs.path.basename(path)}) catch "Saved file list",
+            .failed => |err| std.fmt.bufPrint(&ui.notice, "Could not save file list ({s})", .{@errorName(err)}) catch "Could not save file list",
+        };
+        ui.request.revision += 1;
+        ui.dirty = true;
     }
     if (ui.ready and ui.trash_confirmation == null) {
         // A refresh interval after submission leaves each selected image on
@@ -1757,6 +1775,7 @@ const Application = struct {
     window_test_capacity_hit: bool,
     geometry: native.Geometry,
     persist_geometry: bool,
+    filelist_data: input.FilelistBytes,
 };
 fn configureNativeInput(life: *Life) void {
     const state = life.state;
@@ -1772,13 +1791,14 @@ fn configureNativeInput(life: *Life) void {
     state.config.draw_filename = life.filename;
     state.config.draw_actions = life.draw_actions;
     state.config.catalog_options = life.catalog_options;
+    state.config.output_dir = life.output_dir;
     state.config.paused = life.paused;
     state.config.count = life.selection.count;
     const used = life.selection.used;
-    @memcpy(state.config.filelist_data[0..used], life.selection.bytes[0..used]);
+    @memcpy(state.config.selection_data[0..used], life.selection.bytes[0..used]);
     for (life.selection.offsets[0..life.selection.count], 0..) |offset, i| {
-        const text = std.mem.sliceTo(state.config.filelist_data[offset..used], 0);
-        state.config.paths[i] = state.config.filelist_data[offset .. offset + text.len :0];
+        const text = std.mem.sliceTo(state.config.selection_data[offset..used], 0);
+        state.config.paths[i] = state.config.selection_data[offset .. offset + text.len :0];
     }
     state.request.width = life.width;
     state.request.height = life.height;
@@ -1949,6 +1969,7 @@ fn viewer(application: *Application) !void {
                         life.draw_actions = source.state.controller.draw_actions;
                         life.view = if (life.settings.keep_view) source.ui.request.view else .{ .mode = life.settings.fit };
                         life.catalog_options = source.state.config.catalog_options;
+                        life.output_dir = source.state.config.output_dir;
                         life.catalog_options.start_at = null;
                         life.catalog_options.browse = false;
                         life.selection.count = selection.count;
@@ -2134,7 +2155,7 @@ pub fn run(args: []const [*:0]const u8) !void {
     defer native.render.free(&state.result.pixels);
     var theme: input.Theme = .{};
     const arguments = theme.load(args) catch return error.InvalidArguments;
-    const proceed = parse(state, arguments) catch |err| {
+    const proceed = parse(state, arguments, &application.filelist_data) catch |err| {
         output("arguments: {s}\n", .{@errorName(err)});
         return error.InvalidArguments;
     };
