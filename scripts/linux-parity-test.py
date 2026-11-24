@@ -315,6 +315,15 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
         check("reveal uses FileManager1 with literal escaped file URI", ["--keys", desktop_keys, "--test-keys", "v", special], gui=True)
         stdout, stderr = service.communicate(timeout=10)
         assert service.returncode == 0 and b"REVEALED" in stdout, (stdout, stderr)
+        wallpaper = manager.with_name("linux-wallpaper-test")
+        if not args.fixture or wallpaper.is_file():
+            for mode in ("center", "fill", "max", "scale", "tile"):
+                service = subprocess.Popen([str(wallpaper)], env=environment, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, start_new_session=True)
+                read_handshake(service, "READY")
+                check(f"wallpaper {mode} sends a PNG to the private portal", [f"--bg-{mode}", first])
+                stdout, stderr = service.communicate(timeout=10)
+                assert service.returncode == 0, (stdout, stderr)
     finally:
         if old_address is None:
             environment.pop("DBUS_SESSION_BUS_ADDRESS", None)
