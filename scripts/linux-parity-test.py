@@ -167,6 +167,17 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
     [exported] = export_dir.glob("feh_*_000001_filelist")
     assert exported.read_text() == f"{second}\n" and first.exists() and second.exists()
     assert check("reopen exported filelist", ["-f", exported, "--print-filelist"]).stdout == f"{second}\n"
+    edit_source = folder / "edit-source.jpg"
+    check("generate a JPEG with whole transform blocks", [
+        "-m", "-W32", "-H16", "-y32", "-E16", "-sX", "-O", edit_source, first,
+    ])
+    result = check("rotate a JPEG in place", ["--edit", "--trace-events", "--test-keys", "greater", edit_source], gui=True)
+    assert check("read the edited JPEG", ["-L", "%w %h", edit_source]).stdout == "16 32\n"
+    check("save the displayed transform as a copy", [
+        "-j", export_dir, "--test-keys", "greater,s", edit_source,
+    ], gui=True)
+    [rotated_copy] = export_dir.glob("feh_*_edit-source.jpg")
+    assert check("read the saved copy", ["-L", "%w %h", rotated_copy]).stdout == "32 16\n"
     result = check("failed filelist export reports the error and leaves the viewer usable", [
         "--output-dir", export_dir / "missing", "--trace-events", "--test-keys", "L,n", first, second,
     ], gui=True)

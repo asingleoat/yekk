@@ -169,6 +169,7 @@ pub const Controller = struct {
         if (view_actions.apply(action, &self.settings, &request.view, .{ .width = @floatFromInt(request.width), .height = @floatFromInt(request.height) })) {
             return .{ .changed = true };
         }
+        if (self.settings.edit and view_actions.editOrientation(action) != null) return .{ .platform = action };
         if (view_actions.transform(action, &request.rotation, &request.mirror)) return .{ .changed = true };
         switch (action) {
             .next => return self.step(false, false, request),

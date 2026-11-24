@@ -34,8 +34,20 @@ fn append(path: [*:0]const u8) bool {
     selection.used += @intCast(length);
     return true;
 }
+pub fn openPath(path: [*:0]const u8) bool {
+    if (status.cmpxchgStrong(.idle, .writing, .acquire, .monotonic) != null) return false;
+    selection.count = 0;
+    selection.used = 0;
+    selection.window_id = window_api.id();
+    selection.from_thumbnail = true;
+    const ready = append(path);
+    status.store(if (ready) .ready else .failed, .release);
+    wake();
+    return ready;
+}
 fn dialogDone(userdata: ?*anyopaque, files: [*c]const [*c]const u8, _: c_int) callconv(.c) void {
     selection.window_id = @intCast(@intFromPtr(userdata));
+    selection.from_thumbnail = false;
     var result: Phase = if (files == null) .failed else if (files[0] == null) .cancelled else .ready;
     if (files != null) {
         var i: usize = 0;
@@ -159,6 +171,10 @@ fn context(window: ?*c.SDL_Window) ?*t.Window {
 pub fn event(out: *t.Event) void {
     eventWithTimeout(out, 8);
 }
+pub fn textInput(enabled: bool) bool {
+    const window = t.current().window orelse return false;
+    return if (enabled) c.SDL_StartTextInput(window) else c.SDL_StopTextInput(window);
+}
 pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
     out.* = .{};
     var e: c.SDL_Event = undefined;
@@ -182,6 +198,15 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
             out.key = portableKey(if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) c.SDL_GetKeyFromScancode(e.key.scancode, e.key.mod, false) else e.key.key);
             out.modifiers = eventModifiers(e.key.mod);
         },
+        c.SDL_EVENT_TEXT_INPUT => {
+            out.window_id = e.text.windowID;
+            const value = std.mem.span(e.text.text);
+            if (value.len <= out.text.len) {
+                out.kind = 15;
+                out.text_len = value.len;
+                @memcpy(out.text[0..value.len], value);
+            }
+        },
         c.SDL_EVENT_KEY_UP => {
             out.window_id = e.key.windowID;
             out.kind = 13;
@@ -198,6 +223,7 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
                 selection.count = 0;
                 selection.used = 0;
                 selection.window_id = e.drop.windowID;
+                selection.from_thumbnail = false;
             }
         },
         c.SDL_EVENT_DROP_FILE => {

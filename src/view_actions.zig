@@ -28,19 +28,19 @@ pub fn apply(action: actions.Action, settings: *actions.Settings, view: *core.Vi
             view.reset();
         },
         .pan_left => {
-            view.pan_x -= 64;
+            view.pan_x -= settings.scroll_step;
             view.manual = true;
         },
         .pan_right => {
-            view.pan_x += 64;
+            view.pan_x += settings.scroll_step;
             view.manual = true;
         },
         .pan_up => {
-            view.pan_y -= 64;
+            view.pan_y -= settings.scroll_step;
             view.manual = true;
         },
         .pan_down => {
-            view.pan_y += 64;
+            view.pan_y += settings.scroll_step;
             view.manual = true;
         },
         .pan_left_page => {
@@ -81,5 +81,15 @@ pub fn isScaleMode(action: actions.Action) bool {
     return switch (action) {
         .actual, .fit, .shrink, .fill, .fit_width, .fit_height, .auto_zoom => true,
         else => false,
+    };
+}
+
+pub fn editOrientation(action: actions.Action) ?@import("source").Orientation {
+    return switch (action) {
+        .rotate_right => .clockwise,
+        .rotate_left => .counterclockwise,
+        .mirror_horizontal => .mirror_x,
+        .mirror_vertical => .mirror_y,
+        else => null,
     };
 }

@@ -19,6 +19,7 @@ pub const Plan = struct {
     file: source.Open,
     stored: Extent,
     orientation: source.Orientation = .identity,
+    exif: ?source.Range = null,
     gray: bool,
     native: bool,
     sequential: bool = false,
@@ -39,7 +40,7 @@ pub const Plan = struct {
         var subsampled = false;
         var restart = false;
         var orientation: source.Orientation = .identity;
-        var saw_exif = false;
+        var exif: ?source.Range = null;
         var parts: [255]?source.Range = @splat(null);
         var part_count: usize = 0;
         var profile_bytes: usize = 0;
@@ -69,7 +70,7 @@ pub const Plan = struct {
                 sequential = sequential and count[0] == (if (gray) @as(u8, 1) else 3);
                 for (parts[0..part_count]) |part| if (part == null) return error.DecodeFailed;
                 if (!file.unchanged()) return error.SourceChanged;
-                return .{ .file = file, .stored = stored, .orientation = orientation, .gray = gray, .native = native, .sequential = sequential and !restart, .subsampled = subsampled, .profile_parts = parts, .profile_count = part_count, .profile_bytes = profile_bytes };
+                return .{ .file = file, .stored = stored, .orientation = orientation, .exif = exif, .gray = gray, .native = native, .sequential = sequential and !restart, .subsampled = subsampled, .profile_parts = parts, .profile_count = part_count, .profile_bytes = profile_bytes };
             }
             if ((code >= 0xc0 and code <= 0xcf) and code != 0xc4 and code != 0xc8 and code != 0xcc) {
                 if (dimensions != null or payload.length < 6) return error.DecodeFailed;
@@ -97,8 +98,10 @@ pub const Plan = struct {
                 if (std.mem.eql(u8, &prefix, "Exif\x00\x00")) {
                     // Some writers append another Exif block with auxiliary
                     // tags. The first block supplies the image orientation.
-                    if (!saw_exif) orientation = try source.exifOrientation(source.Range{ .file = file, .offset = payload.offset + 6, .length = payload.length - 6 });
-                    saw_exif = true;
+                    if (exif == null) {
+                        exif = .{ .file = file, .offset = payload.offset + 6, .length = payload.length - 6 };
+                        orientation = try source.exifOrientation(exif.?);
+                    }
                 }
             } else if (code == 0xe2 and payload.length >= 12) {
                 var prefix: [14]u8 = undefined;
@@ -269,4 +272,51 @@ test "JPEG retains out-of-order ICC segments and expands grayscale without a nat
 }
 test {
     _ = @import("jpeg_entropy.zig");
+}
+
+pub const Edited = struct {
+    data: [*c]u8,
+    len: usize,
+    pub fn deinit(self: Edited) void {
+        c.tj3Free(self.data);
+    }
+};
+
+pub fn edit(file: source.Open, operation: source.Orientation, allocator: std.mem.Allocator) !Edited {
+    if (file.format != .jpeg) return error.EditRequiresJpeg;
+    const plan = try Plan.read(file, null);
+    const bytes = try allocator.alloc(u8, @intCast(file.stamp.bytes));
+    defer allocator.free(bytes);
+    var used: usize = 0;
+    while (used < bytes.len) {
+        const count = try file.readAt(bytes[used..], used);
+        if (count == 0) return error.IncompleteImage;
+        used += count;
+    }
+    if (!file.unchanged()) return error.SourceChanged;
+    const orientation = source.composeOrientation(plan.orientation, operation);
+    if (plan.exif) |range| {
+        const at: usize = @intCast(range.offset);
+        try source.normalizeExif(bytes[at..][0..range.length]);
+    }
+    const transform: c.tjtransform = .{
+        .op = switch (orientation) {
+            .identity => c.TJXOP_NONE,
+            .mirror_x => c.TJXOP_HFLIP,
+            .mirror_y => c.TJXOP_VFLIP,
+            .clockwise => c.TJXOP_ROT90,
+            .counterclockwise => c.TJXOP_ROT270,
+            .half_turn => c.TJXOP_ROT180,
+            .transpose => c.TJXOP_TRANSPOSE,
+            .transverse => c.TJXOP_TRANSVERSE,
+        },
+        .options = c.TJXOPT_PERFECT,
+    };
+    const handle = c.tj3Init(c.TJINIT_TRANSFORM) orelse return error.OutOfMemory;
+    defer c.tj3Destroy(handle);
+    var data: [*c]u8 = null;
+    errdefer if (data != null) c.tj3Free(data);
+    var len: usize = 0;
+    if (c.tj3Transform(handle, bytes.ptr, bytes.len, 1, &data, &len, &transform) != 0 or data == null or len == 0) return error.ImperfectJpegTransform;
+    return .{ .data = data, .len = len };
 }

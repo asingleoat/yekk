@@ -3,6 +3,7 @@ const std = @import("std");
 const c = @import("system");
 const runtime = @import("runtime");
 const files = runtime.files;
+const remote = @import("remote.zig");
 pub const capacity = 16384;
 pub const path_capacity = 8 * 1024 * 1024;
 pub const Dimensions = struct {
@@ -37,13 +38,18 @@ pub const Info = struct {
     }
 };
 pub const Probe = *const fn ([:0]const u8, ?*const std.atomic.Value(bool)) ?Info;
+pub const Validate = *const fn ([:0]const u8, ?*const std.atomic.Value(bool)) anyerror!bool;
 pub const Entry = struct {
     path: [:0]const u8,
     label: ?[:0]const u8 = null,
     id: usize,
     mtime: i128 = 0,
     bytes: i64 = 0,
+    downloaded: bool = false,
 
+    pub fn savedPath(self: Entry) [:0]const u8 {
+        return if (self.downloaded) self.display() else self.path;
+    }
     pub fn display(self: Entry) [:0]const u8 {
         return self.label orelse self.path;
     }
@@ -60,6 +66,10 @@ pub const Options = struct {
     minimum: Dimensions = .{},
     maximum: Dimensions = .{},
     report_paths: bool = false,
+    preload: bool = false,
+    quiet: bool = false,
+    verbose: bool = false,
+    network: remote.Options = .{},
 
     pub fn needsInfo(self: Options) bool {
         return self.minimum.width != 0 or self.minimum.height != 0 or
@@ -81,11 +91,13 @@ pub const Catalog = struct {
     initial: ?Entry = null,
     on_initial: ?*const fn (Entry) void = null,
     probe: ?Probe = null,
+    validate: ?Validate = null,
+    downloads: ?*remote.Session = null,
     // Populated by metadata sorting, filtering or listing.
     info: [capacity]Info = undefined,
     info_ready: bool = false,
 
-    fn add(self: *Catalog, path: []const u8, label: ?[]const u8, st: c.struct_stat) !void {
+    fn add(self: *Catalog, path: []const u8, label: ?[]const u8, st: c.struct_stat, downloaded: bool) !void {
         if (self.selected) |selected| if (std.mem.eql(u8, selected, path)) {
             for (self.entries[0..self.count]) |e| if (std.mem.eql(u8, e.path, path)) return;
         };
@@ -93,7 +105,7 @@ pub const Catalog = struct {
         const stored = try self.storePath(path);
         const display = if (label) |value| if (std.mem.eql(u8, value, path)) null else try self.storePath(value) else null;
         const modified = if (runtime.darwin) st.st_mtimespec else st.st_mtim;
-        const entry: Entry = .{ .path = stored, .label = display, .id = self.count, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
+        const entry: Entry = .{ .path = stored, .label = display, .id = self.count, .downloaded = downloaded, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
         self.entries[self.count] = entry;
         self.count += 1;
     }
@@ -112,32 +124,37 @@ pub const Catalog = struct {
         for (inputs, 0..) |input, argument| {
             if (self.cancel) |cancel| if (cancel.load(.acquire)) return error.Cancelled;
             var resolved: [4096]u8 = undefined;
+            var staging: [4096]u8 = undefined;
+            const downloaded = remote.isUrl(input);
+            const local = if (downloaded) (self.downloads orelse return error.NetworkUnavailable).fetch(&staging, input, options.network, self.cancel) catch |err| {
+                if (err == error.Cancelled) return err;
+                if (!options.quiet) diagnosePath("yekk: cannot download ", input);
+                continue;
+            } else input;
             var st: c.struct_stat = undefined;
-            if (files.stat(input.ptr, &st) != 0) {
+            if (files.stat(local.ptr, &st) != 0) {
                 if (!options.report_paths) return error.PathNotReadable;
-                runtime.output(2, "yekk: cannot read ");
-                runtime.output(2, input);
-                runtime.output(2, "\n");
+                if (!options.quiet) diagnosePath("yekk: cannot read ", input);
                 continue;
             }
             if (st.st_mode & c.S_IFMT == c.S_IFDIR) {
                 if (c.realpath(input.ptr, &resolved) == null) return error.PathNotReadable;
                 try self.directory(std.mem.sliceTo(&resolved, 0), if (keep_labels) input else null, options, 0);
             } else if (st.st_mode & c.S_IFMT == c.S_IFREG) {
-                const path = try operationPath(input, &resolved);
-                try self.add(path, if (keep_labels) input else null, st);
+                const path = try operationPath(local, &resolved);
+                try self.add(path, if (keep_labels or downloaded) input else null, st, downloaded);
                 if (argument == 0) {
                     self.initial = self.entries[self.count - 1];
-                    if (!options.needsInfo()) if (self.on_initial) |callback| callback(self.initial.?);
+                    if (!options.preload and !options.needsInfo()) if (self.on_initial) |callback| callback(self.initial.?);
                 }
-                if (options.browse and inputs.len == 1) {
+                if (options.browse and !downloaded and inputs.len == 1) {
                     self.selected = self.entries[0].path;
                     try self.directory(std.fs.path.dirname(path).?, if (keep_labels) std.fs.path.dirname(input) orelse "." else null, options, 0);
                     if (options.sort != .none) std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
                 }
             } else return error.UnsupportedFileType;
         }
-        if (options.needsInfo()) try self.filterInfo(options);
+        if (options.preload or options.needsInfo()) try self.filterInfo(options);
         if (options.sort) |mode| {
             if (mode != .none) std.mem.sort(Entry, self.entries[0..self.count], SortContext{ .options = options, .info = &self.info }, ordered);
         } else if (options.version_sort) std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
@@ -160,6 +177,10 @@ pub const Catalog = struct {
             if (self.selected == null) return error.StartImageNotFound;
         }
         if (self.count == 0) return error.NoImagesFound;
+        if (options.verbose) {
+            var line: [96]u8 = undefined;
+            runtime.output(2, try std.fmt.bufPrint(&line, "yekk: indexed {d} files\n", .{self.count}));
+        }
     }
 
     pub fn prepareListingInfo(self: *Catalog, probe: Probe) usize {
@@ -178,22 +199,30 @@ pub const Catalog = struct {
     }
 
     fn filterInfo(self: *Catalog, options: Options) !void {
-        const probe = self.probe orelse return error.MetadataUnavailable;
+        const needs_info = options.needsInfo();
+        const validate = if (options.preload) self.validate orelse return error.MetadataUnavailable else null;
+        const probe = if (needs_info) self.probe orelse return error.MetadataUnavailable else null;
         var count: usize = 0;
         for (self.entries[0..self.count]) |entry| {
             if (self.cancel) |cancel| if (cancel.load(.acquire)) return error.Cancelled;
-            const info = probe(entry.path, self.cancel) orelse continue;
-            if (info.size.width < options.minimum.width or info.size.height < options.minimum.height or
-                (options.maximum.width != 0 and info.size.width > options.maximum.width) or
-                (options.maximum.height != 0 and info.size.height > options.maximum.height)) continue;
+            if (validate) |validate_file| if (!(try validate_file(entry.path, self.cancel))) {
+                if (!options.quiet) diagnosePath("yekk: cannot decode ", entry.display());
+                continue;
+            };
+            if (probe) |probe_info| {
+                const info = probe_info(entry.path, self.cancel) orelse continue;
+                if (info.size.width < options.minimum.width or info.size.height < options.minimum.height or
+                    (options.maximum.width != 0 and info.size.width > options.maximum.width) or
+                    (options.maximum.height != 0 and info.size.height > options.maximum.height)) continue;
+                self.info[count] = info;
+            }
             var kept = entry;
             kept.id = count;
             self.entries[count] = kept;
-            self.info[count] = info;
             count += 1;
         }
         self.count = count;
-        self.info_ready = true;
+        self.info_ready = needs_info;
     }
 
     fn directory(self: *Catalog, path: []const u8, display: ?[]const u8, options: Options, depth: usize) !void {
@@ -235,12 +264,17 @@ pub const Catalog = struct {
                 if (kind == c.S_IFLNK) {
                     if (files.stat(child.ptr, &st) != 0 or st.st_mode & c.S_IFMT != c.S_IFREG) continue;
                 } else if (kind != c.S_IFREG) continue;
-                try self.add(child, label, st);
+                try self.add(child, label, st, false);
             }
         }
         if (options.sort != .none) std.mem.sort(Entry, self.entries[start..self.count], Sort.natural, less);
     }
 };
+
+fn diagnosePath(prefix: []const u8, path: []const u8) void {
+    var line: [8192]u8 = undefined;
+    runtime.output(2, std.fmt.bufPrint(&line, "{s}{s}\n", .{ prefix, path }) catch prefix);
+}
 
 /// Resolve the directory for consistent absolute paths, retaining the selected
 /// leaf. Decoding/stat may follow a symlink; hooks, copying paths and Trash must

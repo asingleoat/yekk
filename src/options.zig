@@ -34,6 +34,37 @@ pub const Iterator = struct {
                 'T' => "theme",
                 'f' => "filelist",
                 'j' => "output-dir",
+                '^' => "title",
+                'K' => "caption-path",
+                'w' => "multiwindow",
+                'Y' => "hide-pointer",
+                'N' => "no-menus",
+                'q' => "quiet",
+                'V' => "verbose",
+                'p' => "preload",
+                'k' => "keep-http",
+                'm' => "montage",
+                'i' => "index",
+                'I' => "fullindex",
+                't' => "thumbnails",
+                'o' => "output",
+                'O' => "output-only",
+                'y' => "thumb-width",
+                'E' => "thumb-height",
+                'W' => "limit-width",
+                'H' => "limit-height",
+                's' => "stretch",
+                'X' => "ignore-aspect",
+                'a' => "alpha",
+                'b' => "bg",
+                'B' => "image-bg",
+                'P' => "cache-thumbnails",
+                'e' => "font",
+                'C' => "fontpath",
+                'M' => "menu-font",
+                '@' => "title-font",
+                '~' => "thumb-title",
+                'J' => "thumb-redraw",
                 '|' => "start-at",
                 else => return error.UnknownOption,
             };
@@ -72,7 +103,7 @@ pub const Iterator = struct {
 };
 fn needsValue(name: []const u8) bool {
     if (std.mem.eql(u8, name, "action") or (name.len == 7 and std.mem.startsWith(u8, name, "action") and std.ascii.isDigit(name[6]))) return true;
-    inline for (.{ "sort", "customlist", "min-dimension", "max-dimension", "theme", "buttons", "fit", "slideshow", "slideshow-delay", "snapshot", "config", "zoom", "zoom-step", "on-last-slide", "reload", "filelist", "output-dir", "start-at", "keys", "stress-test", "geometry", "decode-workers", "test-keys", "test-open", "window-test" }) |value| if (std.mem.eql(u8, name, value)) return true;
+    inline for (.{ "sort", "customlist", "min-dimension", "max-dimension", "theme", "buttons", "title", "thumb-title", "font", "fontpath", "menu-font", "title-font", "thumb-redraw", "caption-path", "info", "output", "output-only", "thumb-width", "thumb-height", "xinerama-index", "limit-width", "limit-height", "alpha", "bg", "image-bg", "index-info", "fit", "slideshow", "slideshow-delay", "snapshot", "config", "zoom", "zoom-step", "scroll-step", "on-last-slide", "reload", "filelist", "output-dir", "start-at", "keys", "stress-test", "geometry", "decode-workers", "test-keys", "test-open", "window-test" }) |value| if (std.mem.eql(u8, name, value)) return true;
     return false;
 }
 test "feh short bundles, attached values, equals and literal file arguments" {

@@ -37,9 +37,26 @@ pub const Command = struct {
         return self.bytes[self.title_start..][0..self.title_len];
     }
 };
+pub const Mode = enum {
+    slideshow,
+    multiwindow,
+    montage,
+    index,
+    thumbnails,
+    thumbview,
+    list,
+    loadables,
+    unloadables,
+    pub fn hasWindow(self: Mode) bool {
+        return switch (self) {
+            .list, .loadables, .unloadables => false,
+            else => true,
+        };
+    }
+};
 pub const Snapshot = struct {
     path: []const u8,
-    mode: enum { slideshow, list, loadables, unloadables } = .slideshow,
+    mode: Mode = .slideshow,
     width: u32 = 0,
     height: u32 = 0,
     bytes: u64 = 0,
@@ -148,11 +165,11 @@ fn formatFor(output: []u8, template: []const u8, image: Snapshot, kind: enum { s
             'p' => try writer.number("{d}", .{@as(u64, image.width) * image.height}),
             'l' => try writer.number("{d}", .{image.count}),
             'u' => try writer.number("{d}", .{image.index}),
-            'g' => if (image.mode == .slideshow) try writer.number("{d},{d}", .{ image.viewport_width, image.viewport_height }),
-            'o' => if (image.mode == .slideshow) try writer.number("{d:.0},{d:.0}", .{ image.offset_x, image.offset_y }),
+            'g' => if (image.mode.hasWindow()) try writer.number("{d},{d}", .{ image.viewport_width, image.viewport_height }),
+            'o' => if (image.mode.hasWindow()) try writer.number("{d:.0},{d:.0}", .{ image.offset_x, image.offset_y }),
             'z' => try writer.number("{d:.2}", .{image.zoom}),
-            'Z' => if (image.mode == .slideshow) try writer.number("{d:.8}", .{image.zoom}),
-            'r' => if (image.mode == .slideshow) try writer.number("{d:.8}", .{@as(f64, @floatFromInt(image.rotation)) * std.math.pi / 2.0}),
+            'Z' => if (image.mode.hasWindow()) try writer.number("{d:.8}", .{image.zoom}),
+            'r' => if (image.mode.hasWindow()) try writer.number("{d:.8}", .{@as(f64, @floatFromInt(image.rotation)) * std.math.pi / 2.0}),
             'a' => try writer.add(if (image.playing) "playing" else "paused"),
             'm' => try writer.add(@tagName(image.mode)),
             'v' => try writer.add(@import("version.zig").text),

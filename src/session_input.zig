@@ -237,12 +237,15 @@ pub fn writeAll(fd: c_int, bytes: []const u8) !void {
 const Entries = struct {
     entries: []const catalog.Entry,
     order: ?[]const usize = null,
+    first: ?catalog.Entry = null,
 
     fn len(self: Entries) usize {
         return if (self.order) |ids| ids.len else self.entries.len;
     }
     fn path(self: Entries, index: usize) [:0]const u8 {
-        return self.entries[if (self.order) |ids| ids[index] else index].path;
+        const id = if (self.order) |ids| ids[index] else index;
+        if (id == 0 and self.first != null) return self.first.?.savedPath();
+        return self.entries[id].savedPath();
     }
 };
 
@@ -281,17 +284,26 @@ const LineList = union(enum) {
     }
 };
 
-pub fn writeEntries(fd: c_int, entries: []const catalog.Entry, order: ?[]const usize) !void {
-    const list = try (LineList{ .catalog = .{ .entries = entries, .order = order } }).checked();
+pub fn writeEntries(fd: c_int, entries: []const catalog.Entry, order: ?[]const usize, first: ?catalog.Entry) !void {
+    const list = try (LineList{ .catalog = .{ .entries = entries, .order = order, .first = first } }).checked();
     try list.write(fd);
 }
 pub fn save(path: [:0]const u8, entries: []const catalog.Entry, order: ?[]const usize) !void {
     if (std.mem.eql(u8, path, "-")) return;
     const list = try (LineList{ .catalog = .{ .entries = entries, .order = order } }).checked();
-    try saveList(path, list, .replace);
+    try saveFile(path, .{ .list = list }, .replace);
 }
 
-fn saveList(path: [:0]const u8, list: LineList, mode: enum { replace, create }) !void {
+pub fn saveWithFirst(path: [:0]const u8, entries: []const catalog.Entry, first: catalog.Entry) !void {
+    if (std.mem.eql(u8, path, "-")) return;
+    const list = try (LineList{ .catalog = .{ .entries = entries, .first = first } }).checked();
+    try saveFile(path, .{ .list = list }, .replace);
+}
+pub fn saveText(path: [:0]const u8, text: []const u8) !void {
+    try saveFile(path, .{ .text = text }, .replace);
+}
+
+fn saveFile(path: [:0]const u8, contents: union(enum) { list: LineList, text: []const u8 }, mode: enum { replace, create }) !void {
     var buffer: [4096]u8 = undefined;
     const temporary = try std.fmt.bufPrintSentinel(&buffer, "{s}.yekk-XXXXXX", .{path}, 0);
     const fd = c.mkstemp(temporary.ptr);
@@ -305,7 +317,10 @@ fn saveList(path: [:0]const u8, list: LineList, mode: enum { replace, create }) 
         var stat: c.struct_stat = undefined;
         if (files.stat(path.ptr, &stat) == 0 and c.fchmod(fd, stat.st_mode & 0o777) != 0) return error.FilelistWriteFailed;
     }
-    try list.write(fd);
+    switch (contents) {
+        .list => |list| try list.write(fd),
+        .text => |text| try writeAll(fd, text),
+    }
     if (c.fsync(fd) != 0) return error.FilelistWriteFailed;
     const status = c.close(fd);
     open = false;
@@ -328,7 +343,7 @@ fn saveExport(buffer: []u8, directory: [:0]const u8, paths: []const [:0]const u8
     while (true) {
         const number = export_number.fetchAdd(1, .monotonic);
         const path = try std.fmt.bufPrintSentinel(buffer, "{s}/feh_{d}_{d:0>6}_filelist", .{ directory, c.getpid(), number }, 0);
-        saveList(path, list, .create) catch |err| switch (err) {
+        saveFile(path, .{ .list = list }, .create) catch |err| switch (err) {
             error.FilelistNameTaken => continue,
             else => return err,
         };

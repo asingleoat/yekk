@@ -79,6 +79,7 @@ pub const Plan = struct {
     file: source.Open,
     header: Header,
     orientation: source.Orientation = .identity,
+    exif: ?source.Range = null,
     palette: [256][4]u8 = @splat(.{ 0, 0, 0, 255 }),
     palette_len: usize = 0,
     transparent: ?[3]u16 = null,
@@ -115,7 +116,6 @@ pub const Plan = struct {
         var at = first.end;
         var data: enum { before, inside, after } = .before;
         var saw_trns = false;
-        var saw_exif = false;
         var saw_gamma = false;
         var saw_chrm = false;
         var srgb = false;
@@ -171,8 +171,8 @@ pub const Plan = struct {
                     const gray = kind == .gray or kind == .gray_alpha;
                     if (plan.profile.?.gray != gray) return error.DecodeFailed;
                 } else if (chunk.is("eXIf")) {
-                    if (!before or saw_exif) return error.DecodeFailed;
-                    saw_exif = true;
+                    if (!before or plan.exif != null) return error.DecodeFailed;
+                    plan.exif = chunk.payload;
                     plan.orientation = try source.exifOrientation(chunk.payload);
                 } else if (chunk.is("sRGB")) {
                     if (!before or srgb or plan.palette_len != 0) return error.DecodeFailed;

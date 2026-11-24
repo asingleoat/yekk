@@ -11,7 +11,7 @@ viewer = Path(os.environ.get('YEKK_VIEWER', str(root / 'zig-out/bin/yekk'))).res
 supervisor = root / 'scripts/supervise.py'
 with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     work = Path(directory).resolve()
-    env = dict(os.environ, YEKK_CONFIG=str(work / 'no-config'), XDG_CONFIG_HOME=str(work / 'config'))
+    env = dict(os.environ, YEKK_CONFIG=str(work / 'no-config'), XDG_CONFIG_HOME=str(work / 'config'), XDG_CACHE_HOME=str(work / 'cache'))
     for name in ['keep', 'discard', 'images']:
         (work / name).mkdir()
     paths = [work / 'images' / name for name in ['frame1.png', "frame2 雪'$(exit 73)\n.png", 'frame10.png']]
@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     original.write_bytes(paths[1].read_bytes())
     paths[1].unlink()
     paths[1].symlink_to(original)
-    env.update(KEEP=str(work / 'keep'), DISCARD=str(work / 'discard'), LOG=str(work / 'actions.log'), MANIFEST=str(work / 'manifest'), HOOK_VIEW=str(work / 'hook-view'))
+    env.update(KEEP=str(work / 'keep'), DISCARD=str(work / 'discard'), LOG=str(work / 'actions.log'), MANIFEST=str(work / 'manifest'), HOOK_VIEW=str(work / 'hook-view'), INFO_LOG=str(work / 'info-log'))
     def cli(*args, cwd=work):
         return subprocess.check_output([str(viewer), *map(str, args)], cwd=cwd, env=env, text=True, timeout=5)
     def gui(*args, cwd=work):
@@ -95,15 +95,39 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     assert len(large_text) > 1024 * 1024
     large_list.write_text(large_text)
     assert cli("-f", large_list, "--print-filelist") == large_text
+    # Catalog validation and generated images use the regular decoders.
+    assert cli("-q", "-pL%n", "orientation6.jpg", "truncated.png") == "orientation6.jpg\n"
+    sheet = work / "index.png"
+    cli("-IP", "-y80", "-E40", "-W160", "-H100", "-btrans", "-O", sheet, valid_jpeg, valid_png)
+    assert cli("-L", "%w %h %t", sheet) == "160 100 png\n"
+    assert len(list((Path(env["XDG_CACHE_HOME"]) / "yekk-thumbnails").glob("*.png"))) == 2
+    baseline_sheet = sheet.read_bytes()
+    cli("-IP", "-y80", "-E40", "-W160", "-H100", "-btrans", "-O", sheet, valid_jpeg, valid_png)
+    assert sheet.read_bytes() == baseline_sheet
+    titled_sheet = work / "titled.png"
+    cli("-i", "-eSans/11", "-@Sans/12", "--title", "Sample", "-W160", "-H100", "-O", titled_sheet, valid_jpeg)
+    assert cli("-L", "%w %h %t", titled_sheet) == "160 100 png\n"
+    default_face = Path(os.environ.get("YEKK_FONT_FILE") or "/System/Library/Fonts/Supplemental/Arial.ttf")
+    if default_face.is_file():
+        faces = work / "fonts"
+        faces.mkdir()
+        custom_face = faces / "sample.ttf"
+        custom_face.write_bytes(default_face.read_bytes())
+        cli("-i", "-C", faces, "-esample/11", "-@sample/12", "--title", "Sample", "-W160", "-H100", "-O", titled_sheet, valid_jpeg)
+        assert cli("-L", "%w %h %t", titled_sheet) == "160 100 png\n"
+        custom_face.write_bytes(b"invalid font")
+        classify("-C", [str(faces), "-esample/11", "-i", "-O", str(titled_sheet), "orientation6.jpg"], 2, "")
     if "--headless" in sys.argv[1:]:
         print("feh listing, catalog and theme checks passed")
         raise SystemExit(0)
     out = work / 'save here'
     out.mkdir()
-    output = gui('-xg960x640-0+0', '--hook-test', '--output-dir', out, '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
+    output = gui('-xg960x640-0+0', '--hook-test', '--output-dir', out, '-f', work / 'session-list', '-G',
+                 '--info', "printf '%%s\\n' %N >> \"$INFO_LOG\"", '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
                  '--action2=;[Inspect]printf inspect >> "$LOG"', '--action3=exit 7', '--action4=sleep 0.2; test -f %F',
                  '--action5=sleep 0.2; mv %F "$DISCARD/"', '--action7=echo %f', '--action8=cat %L > "$MANIFEST"', *paths)
     assert 'HOOK_TEST_PASSED' in output, output
+    assert paths[2].name in (work / 'info-log').read_text().splitlines()
     assert (work / 'actions.log').read_text() == 'zero\ninspect'
     viewport, width, height, zoom, origin = (work / 'hook-view').read_text().splitlines()
     vw, vh = map(int, viewport.split(','))

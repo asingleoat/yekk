@@ -28,7 +28,10 @@ suffix = architecture if ' ' not in architecture else 'universal2'
 output = (a.output or root / 'dist' / f'Yekk-{version}-macos-{suffix}.dmg').resolve()
 output.parent.mkdir(parents=True, exist_ok=True)
 def run(*args, **kwargs):
-    return subprocess.check_output(list(map(str, args)), text=True, stderr=subprocess.STDOUT, **kwargs)
+    try:
+        return subprocess.check_output(list(map(str, args)), text=True, stderr=subprocess.STDOUT, **kwargs)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f'{args[0]}: {error.output.strip()}') from error
 def copy_output(source, destination):
     # Nix inputs are read-only. Publish writable artifacts atomically so repeat
     # builds can replace them and an interrupted copy preserves the old result.
@@ -90,7 +93,11 @@ with tempfile.TemporaryDirectory(prefix='yekk-dmg-') as temporary:
             if resolved == original.resolve(): continue
             if resolved not in copied:
                 name = Path(dep).name
-                if name in names and names[name] != resolved: raise RuntimeError(f'library name collision: {name}')
+                if name in names:
+                    # Preserve both implementations when they share an install name.
+                    suffix = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:12]
+                    name = f'{Path(name).stem}-{suffix}.dylib'
+                    if name in names: raise RuntimeError(f'library name collision: {name}')
                 names[name] = resolved; copied[resolved] = libraries / name
                 shutil.copy2(resolved, copied[resolved]); copied[resolved].chmod(0o755)
                 queue.append((resolved, copied[resolved]))

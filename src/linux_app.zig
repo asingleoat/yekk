@@ -12,6 +12,7 @@ const hooks = @import("hooks.zig");
 const commands = @import("commands.zig");
 const actions = @import("actions.zig");
 const controls = @import("linux_controls.zig");
+const view_actions = @import("view_actions.zig");
 const cache = @import("cache.zig");
 const input = @import("session_input.zig");
 const menu = @import("linux_menu.zig");
@@ -148,7 +149,17 @@ const Image = struct {
 };
 
 const Stamp = @import("source").Stamp;
-const Entry = struct { image: ?*Image = null, failed: bool = false, reload: bool = false, refreshing: bool = false, version: u64 = 0, stamp: ?Stamp = null, prefetch_estimate: ?u64 = null };
+const Entry = struct {
+    image: ?*Image = null,
+    failed: bool = false,
+    reload: bool = false,
+    refreshing: bool = false,
+    remote_selected: bool = false,
+    remote_refresh: bool = false,
+    version: u64 = 0,
+    stamp: ?Stamp = null,
+    prefetch_estimate: ?u64 = null,
+};
 const Request = controls.Request;
 const Result = struct { requested_at: f64 = 0, pixels: native.Frame = native.Frame{}, revision: u64 = 0, image_version: u64 = 0, index: usize = 0, width: u32 = 0, height: u32 = 0, view: core.View = .{}, stamp: ?Stamp = null, link_stamp: ?Stamp = null };
 // Single UI producer / render-worker consumer. A full queue leaves ownership
@@ -181,8 +192,15 @@ const FrameRetirement = struct {
         }
     }
 };
+const viewer_text = @import("viewer_text.zig");
+const process_input = @import("process_input.zig");
+const image_output = @import("image_output.zig");
+const contact_sheet = @import("contact_sheet.zig");
+const desktop_wallpaper = @import("wallpaper.zig");
+const typography = @import("typography.zig");
+const Font = typography.Font;
 const HookJob = struct {
-    kind: enum { shell, trash, reveal, external } = .shell,
+    kind: enum { shell, thumbnail, trash, reveal, external, save_image, edit_image } = .shell,
     link_stamp: ?Stamp = null,
     template: hooks.Command = .{},
     snapshot: hooks.Snapshot = .{ .path = "" },
@@ -191,6 +209,8 @@ const HookJob = struct {
     index: usize = 0,
     revision: u64 = 0,
     reload: bool = false,
+    mirror: u2 = 0,
+    edit: @import("source").Orientation = .identity,
     source_stamp: ?Stamp = null,
 };
 const Config = struct {
@@ -204,6 +224,11 @@ const Config = struct {
     formats: bool = false,
     filelist: ?[:0]const u8 = null,
     output_dir: [:0]const u8 = ".",
+    text: viewer_text.Options = .{},
+    multiwindow: bool = false,
+    sheet: contact_sheet.Options = .{},
+    wallpaper: ?desktop_wallpaper.Mode = null,
+    xinerama_index: ?usize = null,
     selection_data: [1024 * 1024 + 1]u8 = undefined,
     geometry: ?@import("geometry").Geometry = null,
     settings: actions.Settings = .{},
@@ -235,6 +260,8 @@ const State = struct {
     context: ?*native.Window = null,
     config: Config = .{},
     catalog: catalog.Catalog = .{},
+    gallery: contact_sheet.Gallery = .{},
+    sheet_preview: native.Frame = .{},
     entries: [catalog.capacity]Entry = @splat(.{}),
     lock: Mutex = .{},
     stop: std.atomic.Value(bool) = .init(false),
@@ -269,6 +296,8 @@ const State = struct {
     removed: [catalog.capacity]std.atomic.Value(bool) = undefined,
     removal_pending: std.atomic.Value(bool) = .init(false),
     filelist_export: input.FilelistExport = .{},
+    text_work: viewer_text.Work = .{},
+    caption_write: viewer_text.CaptionWrite = .{},
     save_failed: std.atomic.Value(bool) = .init(false),
     hook_finished: usize = 0,
     hook_advance: ?usize = null,
@@ -285,7 +314,18 @@ fn output(comptime format: []const u8, args: anytype) void {
     var buffer: [8192]u8 = undefined;
     runtime.output(2, std.fmt.bufPrint(&buffer, format, args) catch "diagnostic too long\n");
 }
-fn parse(state: *State, arguments: input.Arguments, filelist_data: *input.FilelistBytes) !bool {
+fn resolveFont(path: [:0]const u8, buffer: []u8) ![]const u8 {
+    const c = native.types.c;
+    const pattern = c.FcFreeTypeQuery(path.ptr, 0, null, null) orelse return error.InvalidFontFile;
+    defer c.FcPatternDestroy(pattern);
+    var family: [*c]u8 = null;
+    if (c.FcPatternGetString(pattern, "family", 0, &family) != c.FcResultMatch) return error.InvalidFontFile;
+    var style: [*c]u8 = null;
+    _ = c.FcPatternGetString(pattern, "style", 0, &style);
+    if (style == null or std.mem.eql(u8, std.mem.span(style), "Regular")) return std.fmt.bufPrint(buffer, "{s}", .{family});
+    return std.fmt.bufPrint(buffer, "{s} {s}", .{ family, style });
+}
+fn parse(state: *State, arguments: input.Arguments, filelist_data: *input.FilelistBytes, fonts: *[3]typography.ResolvedFont) !bool {
     const cfg = &state.config;
     var common: @import("cli.zig").Options = .{};
     var config_path: ?[:0]const u8 = null;
@@ -339,11 +379,21 @@ fn parse(state: *State, arguments: input.Arguments, filelist_data: *input.Fileli
             return error.UnsupportedOption;
         }
     }
+    try common.finish();
+    const selected_fonts = [_]*?Font{ &common.text.font, &common.text.menu_font, &common.sheet.title_font };
+    for (fonts, selected_fonts) |*storage, font| try storage.apply(font, &common.font_paths, resolveFont);
     common.apply(&cfg.settings);
     memory.report = memory.report or common.allocation_stats;
     cfg.workers = std.math.cast(c_int, common.decode_workers orelse 0) orelse return error.InvalidWorkerCount;
     cfg.filelist = common.filelist orelse cfg.filelist;
     cfg.output_dir = common.output_dir orelse ".";
+    cfg.text = common.text;
+    cfg.text.mode = common.windowMode();
+    cfg.multiwindow = common.multiwindow;
+    cfg.sheet = common.sheet;
+    cfg.wallpaper = common.wallpaper;
+    cfg.xinerama_index = common.xinerama_index;
+    cfg.catalog_options.network = common.network();
     cfg.fullscreen = common.fullscreen;
     cfg.borderless = common.borderless;
     cfg.geometry = common.geometry;
@@ -377,6 +427,8 @@ fn usage() void {
         "-S SORT, --version-sort, --min-dimension WxH, --max-dimension WxH,\n" ++
         "--browse, --start-at PATH, -f FILELIST (- for stdin), -T THEME, --buttons FILE,\n" ++
         "-j, --output-dir DIR (Shift+L saves the current file list),\n" ++
+        "-w, --multiwindow, -^ TITLE, -Y hide pointer, -K CAPTIONS, --draw-exif, --info COMMAND,\n" ++
+        "-m montage, -i index, -t thumbnails, -o FILE, -O output-only FILE, -p preload, -k keep HTTP, --edit,\n" ++
         "-Z fit, -. shrink, --fit MODE, --zoom PERCENT|max|fill, --zoom-step PERCENT,\n" ++
         "--keep-zoom-vp, --no-wrap, -D SECONDS (negative: paused), --on-last-slide POLICY,\n" ++
         "-R SECONDS, --watch, -A COMMAND, --action1..9 COMMAND, --config FILE, --keys FILE,\n" ++
@@ -423,6 +475,84 @@ fn reclaim(state: *State, protected: usize) void {
         }
     }
 }
+const SheetBackend = struct {
+    pub fn tile(canvas: contact_sheet.Canvas, path: [:0]const u8, cell: contact_sheet.Rect, sheet_options: contact_sheet.Options) !catalog.Dimensions {
+        const image = try decode(path);
+        defer image.destroy();
+        const size: catalog.Dimensions = .{ .width = image.pixels.width, .height = image.pixels.height };
+        const out = contact_sheet.fit(cell, size.width, size.height, sheet_options);
+        const c = native.types.c;
+        var reduced: ?*c.VipsImage = null;
+        defer native.types.unref(reduced);
+        if (c.vips_thumbnail_image(image.pixels.image, &reduced, @as(c_int, @intCast(out.width)), "height", @as(c_int, @intCast(out.height)), "size", @as(c_int, c.VIPS_SIZE_FORCE), @as(?*anyopaque, null)) != 0) return error.RenderFailed;
+        var cast: ?*c.VipsImage = null;
+        defer native.types.unref(cast);
+        if (c.vips_cast(reduced, &cast, c.VIPS_FORMAT_UCHAR, "shift", @as(c_int, 1), @as(?*anyopaque, null)) != 0) return error.RenderFailed;
+        try blit(canvas, out, cast.?, sheet_options.opacity);
+        return size;
+    }
+    fn blit(canvas: contact_sheet.Canvas, rect: contact_sheet.Rect, image: *native.types.c.VipsImage, opacity: u8) !void {
+        const c = native.types.c;
+        if (image.BandFmt != c.VIPS_FORMAT_UCHAR or (image.Bands != 3 and image.Bands != 4) or image.Xsize <= 0 or image.Ysize <= 0) return error.RenderFailed;
+        const resident = c.vips_image_copy_memory(image) orelse return error.OutOfMemory;
+        defer native.types.unref(resident);
+        const bytes: [*]const u8 = @ptrCast(c.vips_image_get_data(resident) orelse return error.RenderFailed);
+        const stride: usize = @intCast(image.Xsize);
+        const channels: usize = @intCast(image.Bands);
+        for (0..@min(rect.height, @as(u32, @intCast(image.Ysize)))) |y| {
+            const row = canvas.row(rect.y + y)[@as(usize, rect.x) * 4 ..];
+            for (0..@min(rect.width, stride)) |x| {
+                const offset = (y * stride + x) * channels;
+                const alpha: u16 = if (channels == 4) bytes[offset + 3] else 255;
+                contact_sheet.composite(row[x * 4 ..][0..4], bytes[offset..][0..3], @intCast((alpha * opacity + 127) / 255));
+            }
+        }
+    }
+    pub fn label(canvas: contact_sheet.Canvas, text: [:0]const u8, area: contact_sheet.Rect, font: ?Font) !void {
+        const c = native.types.c;
+        const escaped = c.g_markup_escape_text(text.ptr, @intCast(text.len)) orelse return error.OutOfMemory;
+        defer c.g_free(escaped);
+        var description: [256]u8 = undefined;
+        const face = if (font) |style| (try style.describe(&description)).ptr else null;
+        const glyph = try native.render.textImage(@ptrCast(escaped), @intCast(area.width), 1, face, if (font) |style| if (style.file) |path| path.ptr else null else null);
+        defer native.types.unref(glyph);
+        try blit(canvas, area, glyph, 255);
+    }
+    pub fn progress(state: *State, canvas: contact_sheet.Canvas) void {
+        state.lock.lock();
+        const busy = state.sheet_preview.pixels != null;
+        const width = state.request.width;
+        const height = state.request.height;
+        state.lock.unlock();
+        if (!busy and width > 0 and height > 0) {
+            const c = native.types.c;
+            const bytes = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+            if (c.g_try_malloc(bytes)) |pixels| {
+                var frame: native.Frame = .{ .pixels = pixels, .bytes = bytes, .width = width, .height = height, .output_epoch = native.types.current().output_epoch.load(.acquire) };
+                canvas.preview(.{ .pixels = native.types.bytes(pixels, bytes), .width = @intCast(width), .height = @intCast(height) });
+                if (native.window.prepare(&frame) == 0) {
+                    state.lock.lock();
+                    state.sheet_preview = frame;
+                    state.lock.unlock();
+                } else native.render.free(&frame);
+            }
+        }
+        native.input.wake();
+    }
+    pub fn encode(canvas: contact_sheet.Canvas, path: [:0]const u8, _: image_output.Format) !void {
+        const c = native.types.c;
+        var offset: usize = 0;
+        while (offset < canvas.pixels.len) : (offset += 4) {
+            const alpha: u16 = canvas.pixels[offset + 3];
+            if (alpha > 0 and alpha < 255) for (canvas.pixels[offset..][0..3]) |*byte| {
+                byte.* = @intCast((@as(u16, byte.*) * 255 + alpha / 2) / alpha);
+            };
+        }
+        const result = c.vips_image_new_from_memory(canvas.pixels.ptr, canvas.pixels.len, @intCast(canvas.width), @intCast(canvas.height), 4, c.VIPS_FORMAT_UCHAR) orelse return error.ImageOutputFailed;
+        defer native.types.unref(result);
+        if (c.vips_image_write_to_file(result, path.ptr, @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+    }
+};
 fn catalogInfo(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) ?catalog.Info {
     var metadata: native.Metadata = undefined;
     if (native.image.probeWithCancel(path.ptr, &metadata, cancel) != 0) return null;
@@ -430,8 +560,11 @@ fn catalogInfo(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) ?cata
 }
 
 fn catalogLoadable(path: [:0]const u8) anyerror!bool {
-    const image = decode(path) catch |err| return switch (err) {
-        error.OutOfMemory => err,
+    return catalogValidate(path, null);
+}
+fn catalogValidate(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) anyerror!bool {
+    const image = decodeScheduled(path, memory.allocator(), .{ .cancel = cancel }) catch |err| return switch (err) {
+        error.OutOfMemory, error.Cancelled => err,
         else => false,
     };
     image.destroy();
@@ -441,18 +574,29 @@ fn catalogLoadable(path: [:0]const u8) anyerror!bool {
 fn index(state: *State) !void {
     state.catalog.cancel = &state.stop;
     state.catalog.probe = catalogInfo;
+    state.catalog.validate = catalogValidate;
     try state.catalog.build(state.config.paths[0..state.config.count], state.config.catalog_options);
-    if (state.catalog.selected) |selected| {
+    if (state.config.listing == .none and state.config.wallpaper == null and !state.config.benchmark and (state.config.sheet.mode != .viewer or state.config.sheet.output_only)) {
+        const directory = if (state.config.sheet.destination == null) try state.catalog.downloads.?.workDir() else ".";
+        var opts = state.config.sheet;
+        opts.font = state.config.text.font;
+        opts.title = state.config.text.title;
+        if (opts.mode == .viewer) opts.mode = .montage;
+        try state.gallery.build(&state.catalog, opts, directory, state, SheetBackend);
+    }
+    if (state.config.multiwindow and state.config.listing == .none and !state.config.benchmark and state.catalog.count > native.window_limit)
+        return error.MultiwindowCapacityExceeded;
+    if (!state.config.multiwindow) if (state.catalog.selected) |selected| {
         for (state.catalog.entries[0..state.catalog.count], 0..) |entry, i| {
             if (std.mem.eql(u8, entry.path, selected)) state.request.index = i;
         }
-    }
+    };
     state.indexed.store(true, .release);
     state.changed.notify();
     native.input.wake();
 }
 fn watched(state: *State, id: usize) void {
-    if (state.removed[id].load(.acquire)) return;
+    if (state.removed[id].load(.acquire) or state.catalog.entries[id].downloaded) return;
     state.lock.lock();
     const interested = state.entries[id].image != null or state.entries[id].failed;
     const before = state.entries[id].stamp;
@@ -470,6 +614,19 @@ fn watched(state: *State, id: usize) void {
         }
     }
 }
+fn watchSelection(state: *State, id: usize) void {
+    if (!state.catalog.entries[id].downloaded) return watched(state, id);
+    if (state.removed[id].load(.acquire)) return;
+    state.lock.lock();
+    defer state.lock.unlock();
+    const entry = &state.entries[id];
+    if (!entry.refreshing and (entry.image != null or entry.failed)) {
+        entry.remote_refresh = true;
+        entry.reload = true;
+        state.reload_pending.store(true, .release);
+        state.changed.notify();
+    }
+}
 fn watchWorker(state: *State) void {
     if (state.context) |context| native.types.bind(context);
     var watch_at: f64 = 0;
@@ -480,7 +637,7 @@ fn watchWorker(state: *State) void {
         if (state.indexed.load(.acquire)) {
             const request = state.getRequest();
             if (request.watch and runtime.now() >= watch_at) {
-                watched(state, request.index);
+                watchSelection(state, request.index);
                 for (0..@min(8, state.catalog.count)) |_| {
                     if (cursor != request.index) watched(state, cursor);
                     cursor = (cursor + 1) % state.catalog.count;
@@ -493,6 +650,8 @@ fn watchWorker(state: *State) void {
 }
 fn saveFilelist(state: *State) !void {
     const destination = state.config.filelist orelse return;
+    if (state.gallery.layout != null) return state.gallery.saveFilelist(destination, &state.catalog);
+    if (state.config.multiwindow) return input.save(destination, state.catalog.entries[0..state.catalog.count], null);
     if (!state.controller_ready.load(.acquire)) {
         var request = state.request;
         state.controller.start(state.catalog.count, request.index, &request);
@@ -604,7 +763,7 @@ fn decodeWorker(state: *State) void {
         const selected = state.entries[request.index];
         if (!state.removed[request.index].load(.acquire) and !selected.failed and (selected.image == null or selected.refreshing)) target = request.index else if (selected.image != null and !selected.failed and state.config.prefetch and pressure_selection != request.index and state.presented_revision.load(.acquire) == request.revision) {
             for ([_]?usize{ request.next, request.previous }) |candidate| if (candidate) |id| {
-                if (!state.removed[id].load(.acquire) and !state.entries[id].failed and (state.entries[id].image == null or state.entries[id].refreshing)) {
+                if (!state.removed[id].load(.acquire) and !state.entries[id].failed and !state.entries[id].remote_refresh and (state.entries[id].image == null or state.entries[id].refreshing)) {
                     target = id;
                     break;
                 }
@@ -617,7 +776,7 @@ fn decodeWorker(state: *State) void {
                     foreground_reserve = selected.image.?.pixels.bytes;
                     while (sweep.next(now, available)) |id| {
                         const entry = &state.entries[id];
-                        if (state.removed[id].load(.acquire) or entry.failed or (entry.image != null and !entry.refreshing)) continue;
+                        if (state.removed[id].load(.acquire) or entry.failed or entry.remote_refresh or (entry.image != null and !entry.refreshing)) continue;
                         if (entry.prefetch_estimate) |estimate| if (!cache.prefetchFits(available, estimate, foreground_reserve)) {
                             sweep.blocked(estimate +| foreground_reserve);
                             continue;
@@ -629,6 +788,7 @@ fn decodeWorker(state: *State) void {
                 }
             }
         }
+        const refresh_remote = target == request.index and selected.remote_refresh;
         state.lock.unlock();
         if (target) |id| {
             const foreground = id == request.index;
@@ -656,7 +816,21 @@ fn decodeWorker(state: *State) void {
             };
             const cancel = if (aggressive) &state.distant_cancel else &state.stop;
             if (state.stop.load(.acquire)) continue;
-            const path = state.catalog.entries[id].path;
+            const selected_path = state.catalog.entries[id];
+            const path = selected_path.path;
+            if (refresh_remote) {
+                state.lock.lock();
+                const still_selected = state.request.index == id;
+                if (still_selected) state.entries[id].remote_refresh = false;
+                state.lock.unlock();
+                if (!still_selected) continue;
+                state.catalog.downloads.?.refresh(selected_path.savedPath(), path, state.config.catalog_options.network, cancel) catch |err| {
+                    if (cancel.load(.acquire)) return;
+                    output("download {s}: {s}\n", .{ selected_path.savedPath(), @errorName(err) });
+                    failedDecode(state, id, Stamp.read(path));
+                    continue;
+                };
+            }
             const stamp = Stamp.read(path);
             if (aggressive) {
                 state.lock.lock();
@@ -947,23 +1121,66 @@ fn renderWorker(state: *State) void {
 }
 
 fn executeHook(state: *State, job: *HookJob) !commands.Result {
+    const execution = @import("hook_execution.zig");
     var source_path: [4096]u8 = undefined;
     const original_path = try std.fmt.bufPrintSentinel(&source_path, "{s}", .{job.snapshot.path}, 0);
-    if (!std.meta.eql(Stamp.read(original_path), job.source_stamp)) return error.SourceChanged;
+    if (job.kind != .thumbnail and !std.meta.eql(Stamp.read(original_path), job.source_stamp)) return error.SourceChanged;
     var command: [16384]u8 = undefined;
     var metadata: native.Metadata = undefined;
-    if (hooks.usesSpecifier(job.template.body(), 't')) {
-        if (native.image.probe(@ptrCast(job.snapshot.path.ptr), &metadata) != 0) return error.MetadataFailed;
+    if (job.kind == .thumbnail or hooks.usesSpecifier(job.template.body(), 't')) {
+        if (native.image.probe(original_path.ptr, &metadata) != 0) return error.MetadataFailed;
         job.snapshot.image_format = std.mem.sliceTo(&metadata.format, 0);
+        if (job.kind == .thumbnail) {
+            job.snapshot.width = metadata.width;
+            job.snapshot.height = metadata.height;
+        }
     }
-    return @import("hook_execution.zig").run(&command, job.template, job.snapshot, .{ .entries = .{ .entries = state.catalog.entries[0..state.catalog.count], .order = job.order[0..job.count] } }, &state.stop);
+    const paths: execution.Paths = if (job.kind == .thumbnail) .{ .entries = .{ .entries = state.catalog.entries[0..state.gallery.original_count], .first = state.gallery.original_first } } else .{ .entries = .{ .entries = state.catalog.entries[0..state.catalog.count], .order = job.order[0..job.count] } };
+    return execution.run(&command, job.template, job.snapshot, paths, &state.stop);
 }
 
+fn writeTransformed(job: *const HookJob, path: [:0]const u8, _: image_output.Format) !void {
+    var source_name: [4096]u8 = undefined;
+    const filename = try std.fmt.bufPrintSentinel(&source_name, "{s}", .{job.snapshot.path}, 0);
+    const image = try decode(filename);
+    defer image.destroy();
+    if (!std.meta.eql(@as(?Stamp, image.stamp), job.source_stamp) or !std.meta.eql(image.link_stamp, job.link_stamp)) return error.SourceChanged;
+    const c = native.types.c;
+    var source = image.pixels.image.?;
+    var rotated: ?*c.VipsImage = null;
+    defer native.types.unref(rotated);
+    var horizontal: ?*c.VipsImage = null;
+    defer native.types.unref(horizontal);
+    var vertical: ?*c.VipsImage = null;
+    defer native.types.unref(vertical);
+    const rotation = job.snapshot.rotation;
+    if (rotation != 0) {
+        if (c.vips_rot(source, &rotated, @as(c_uint, rotation), @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+        source = rotated.?;
+    }
+    if (job.mirror & 1 != 0) {
+        if (c.vips_flip(source, &horizontal, c.VIPS_DIRECTION_HORIZONTAL, @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+        source = horizontal.?;
+    }
+    if (job.mirror & 2 != 0) {
+        if (c.vips_flip(source, &vertical, c.VIPS_DIRECTION_VERTICAL, @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+        source = vertical.?;
+    }
+    if (c.vips_image_write_to_file(source, path.ptr, @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+}
 fn auxiliary(state: *State, job: *HookJob) !commands.Result {
     if (state.stop.load(.acquire)) return error.Cancelled;
     var buffer: [4096]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&buffer, "{s}", .{job.snapshot.path}, 0);
     if (!std.meta.eql(Stamp.read(path), job.source_stamp) or !std.meta.eql(Stamp.readLink(path), job.link_stamp)) return error.SourceChanged;
+    if (job.kind == .edit_image) {
+        try image_output.editJpeg(path, job.source_stamp, job.edit, memory.allocator());
+        return .{ .status = 0 };
+    }
+    if (job.kind == .save_image) {
+        try image_output.saveCopy(state.config.output_dir, path, job, writeTransformed);
+        return .{ .status = 0 };
+    }
     if (native.desktop.action(path.ptr, switch (job.kind) {
         .trash => 1,
         .reveal => 2,
@@ -973,7 +1190,10 @@ fn auxiliary(state: *State, job: *HookJob) !commands.Result {
 }
 fn hookWorker(state: *State) void {
     if (state.context) |context| native.types.bind(context);
+    defer _ = state.caption_write.runPending();
     while (!state.stop.load(.acquire)) {
+        if (state.caption_write.runPending()) native.input.wake();
+        if (state.text_work.runPending(catalogInfo)) native.input.wake();
         state.lock.lock();
         const pending = state.hook_pending;
         var job: HookJob = undefined;
@@ -985,7 +1205,7 @@ fn hookWorker(state: *State) void {
         state.lock.unlock();
         if (pending) {
             var failed = false;
-            const result = (if (job.kind == .shell) executeHook(state, &job) else auxiliary(state, &job)) catch |err| value: {
+            const result = (if (job.kind == .shell or job.kind == .thumbnail) executeHook(state, &job) else auxiliary(state, &job)) catch |err| value: {
                 output("hook failed: {s}\n", .{@errorName(err)});
                 failed = true;
                 break :value commands.Result{};
@@ -999,8 +1219,9 @@ fn hookWorker(state: *State) void {
             state.hook_revision = job.revision;
             state.hook_remove = if (!exists and (job.kind == .shell or (job.kind == .trash and !failed and result.success()))) job.index else null;
             state.hook_advance = if (job.kind == .shell and exists and !job.reload and !state.hook_failed) job.index else null;
-            if (job.kind == .shell and job.reload and !state.hook_failed) {
+            if ((job.kind == .edit_image or (job.kind == .shell and job.reload)) and !state.hook_failed) {
                 state.entries[job.index].reload = true;
+                state.entries[job.index].remote_refresh = state.catalog.entries[job.index].downloaded and job.kind == .shell;
                 state.reload_pending.store(true, .release);
             }
             state.lock.unlock();
@@ -1066,7 +1287,12 @@ const Life = struct {
     trace: bool = false,
     workers: c_int = 0,
     catalog_options: catalog.Options = .{},
+    fullscreen: bool = false,
+    borderless: bool = false,
+    initial_geometry: ?@import("geometry").Geometry = null,
+    initial_zoom: ?f64 = null,
     output_dir: [:0]const u8 = ".",
+    text: viewer_text.Options = .{},
     filename: bool = false,
     draw_actions: bool = false,
     extra_frame: native.Frame = native.Frame{},
@@ -1101,6 +1327,16 @@ fn initialize(state: *State) void {
     state.result = .{};
     state.controller.random = .init(seed);
 }
+fn setFonts(window: *native.Window, options_text: viewer_text.Options) void {
+    if (options_text.font) |font| {
+        _ = font.describe(&window.overlay_font) catch {};
+        window.overlay_font_file = if (font.file) |path| path.ptr else null;
+    }
+    if (options_text.menu_font) |font| {
+        _ = font.describe(&window.menu_font) catch {};
+        window.menu_font_file = if (font.file) |path| path.ptr else null;
+    }
+}
 fn configureController(state: *State) void {
     state.controller.settings = state.config.settings;
     state.controller.initial_zoom = state.config.initial_zoom;
@@ -1109,6 +1345,9 @@ fn configureController(state: *State) void {
     state.controller.draw_filename = state.config.draw_filename;
     state.controller.draw_actions = state.config.draw_actions;
     state.request.checker = state.config.settings.checker;
+    native.types.current().background_color = state.config.settings.background_color;
+    setFonts(native.types.current(), state.config.text);
+    state.request.nearest = state.request.nearest or state.config.settings.nearest;
 }
 fn coordinate(life: *Life) void {
     if (life.context) |context| native.types.bind(context);
@@ -1124,6 +1363,7 @@ fn coordinate(life: *Life) void {
         state.changed.notify();
         for (threads[0..count]) |thread| thread.join();
         native.render.free(&state.result.pixels);
+        native.render.free(&state.sheet_preview);
         life.save_failed = life.save_failed or state.save_failed.load(.acquire);
     }
     inline for (functions) |function| {
@@ -1168,6 +1408,10 @@ const Ui = struct {
     hook_queued: bool = false,
     pending: Result = .{},
     retiring: native.Frame = native.Frame{},
+    text: viewer_text.Options = .{},
+    text_result: ?viewer_text.Result = null,
+    sheet_progress: usize = 0,
+    caption_editor: viewer_text.Editor = .{},
     notice: [256]u8 = undefined,
     notice_text: []const u8 = "",
     test_keys: std.mem.TokenIterator(u8, .scalar) = undefined,
@@ -1175,7 +1419,7 @@ const Ui = struct {
     watch_stage: u8 = 0,
     first_version: u64 = 0,
     fn start(self: *Ui, state: *State) void {
-        self.* = .{ .initialized = true, .request = state.request, .started = runtime.now(), .test_keys = std.mem.tokenizeScalar(u8, state.config.test_keys orelse "", ',') };
+        self.* = .{ .initialized = true, .request = state.request, .text = state.config.text, .started = runtime.now(), .test_keys = std.mem.tokenizeScalar(u8, state.config.test_keys orelse "", ',') };
     }
 };
 fn portableKeypad(key: c_int) c_int {
@@ -1193,12 +1437,84 @@ fn portableKeypad(key: c_int) c_int {
         else => if (key <= 0xffff) key else 0,
     };
 }
+fn textKey(state: *const State, ui: *const Ui) ?viewer_text.Key {
+    const id = ui.displayed_index orelse return null;
+    if (id != ui.request.index) return null;
+    return .{ .index = id, .version = state.presented_version.load(.acquire), .selection = state.controller.selection_serial, .exif = ui.text.exif_visible, .info = ui.text.info_visible };
+}
+fn displayedText(state: *const State, ui: *const Ui) ?*const viewer_text.Result {
+    const key = textKey(state, ui) orelse return null;
+    if (ui.text_result) |*result| if (std.meta.eql(key, result.key)) return result;
+    return null;
+}
+fn displaySnapshot(state: *const State, ui: *const Ui, view: core.View) hooks.Snapshot {
+    return (hooks.Snapshot{
+        .path = state.catalog.entries[ui.request.index].path,
+        .mode = ui.text.mode,
+        .width = ui.base_width,
+        .height = ui.base_height,
+        .bytes = @intCast(@max(0, if (ui.displayed_stamp) |stamp| stamp.bytes else state.catalog.entries[ui.request.index].bytes)),
+        .index = state.controller.position + 1,
+        .count = state.controller.count,
+        .rotation = ui.request.rotation,
+        .playing = state.controller.playing,
+        .pid = posix.getpid(),
+        .image_format = if (displayedText(state, ui)) |result| if (result.format) |*format| format.name() else "unknown" else "unknown",
+    }).withView(view, .{ .width = @floatFromInt(ui.request.width), .height = @floatFromInt(ui.request.height) });
+}
+fn refreshText(state: *State, ui: *Ui) void {
+    if (state.text_work.take()) |result| {
+        ui.text_result = result;
+        ui.request.revision += 1;
+        ui.dirty = true;
+    }
+    if (!ui.text.wanted()) return;
+    const key = textKey(state, ui) orelse {
+        state.text_work.cancel();
+        return;
+    };
+    if (displayedText(state, ui) != null) return;
+    _ = state.text_work.submit(.{ .key = key, .path = state.catalog.entries[key.index].path, .snapshot = displaySnapshot(state, ui, ui.request.view), .options = ui.text }, state.catalog.entries[0..state.catalog.count], state.controller.order[0..state.controller.count]);
+}
+fn editCaption(state: *State, ui: *Ui) void {
+    if (ui.text.caption_dir == null or state.caption_write.busy()) return;
+    const result = displayedText(state, ui) orelse return;
+    if (!native.input.textInput(true)) return;
+    ui.caption_editor.begin(state.catalog.entries[ui.request.index].path, result.caption.bytes());
+    ui.request.revision += 1;
+    ui.dirty = true;
+}
+fn captionInput(state: *State, ui: *Ui, event: native.Event) void {
+    switch (event.kind) {
+        15 => ui.caption_editor.add(event.text[0..event.text_len]),
+        2 => switch (event.key) {
+            27 => ui.caption_editor.path = null,
+            13, actions.keypad_enter => if (event.modifiers & 2 != 0) ui.caption_editor.add("\n") else {
+                if (state.caption_write.submit(&ui.caption_editor, ui.text.caption_dir.?) catch false) {
+                    ui.caption_editor.path = null;
+                } else {
+                    ui.notice_text = "Could not save caption";
+                }
+            },
+            8, 0x7f => ui.caption_editor.backspace(),
+            else => return,
+        },
+        else => return,
+    }
+    if (ui.caption_editor.path == null) _ = native.input.textInput(false);
+    ui.request.revision += 1;
+    ui.dirty = true;
+}
 const UiEffect = enum { idle, close, quit_all };
 fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiEffect {
     _ = state.retirement.push(&ui.retiring);
     var event = incoming;
     if (event.kind == 2) event.key = portableKeypad(event.key);
     if (state.config.test_keys != null and event.kind == 2) ui.test_key_pending = false;
+    if (ui.caption_editor.path != null and ((event.kind >= 2 and event.kind <= 9) or event.kind == 15)) {
+        captionInput(state, ui, event);
+        if (event.kind != 5) event.kind = 0;
+    }
     if (state.index_failed.load(.acquire)) {
         if (state.config.smoke or state.config.stress > 0) return error.IndexFailed;
         native.window.title("Yekk — could not open selection; Ctrl+O to retry");
@@ -1206,6 +1522,24 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
     const event_start = runtime.now();
     defer ui.max_event_ms = @max(ui.max_event_ms, (runtime.now() - event_start) * 1000);
     if (event.kind == 1) return .close;
+    if (!ui.ready and state.config.sheet.mode != .viewer) {
+        const progress = state.gallery.progress.load(.acquire);
+        if (progress != ui.sheet_progress) {
+            ui.sheet_progress = progress;
+            var title_buffer: [96]u8 = undefined;
+            const title = try std.fmt.bufPrintSentinel(&title_buffer, "Contact sheet {d}/{d}", .{ progress, state.gallery.total.load(.acquire) }, 0);
+            native.window.title(title.ptr);
+        }
+        if (ui.retiring.pixels == null and state.lock.tryLock()) {
+            var frame = state.sheet_preview;
+            state.sheet_preview = .{};
+            state.lock.unlock();
+            if (frame.pixels != null) {
+                _ = native.window.present(&frame);
+                if (!state.retirement.push(&frame)) ui.retiring = frame;
+            }
+        }
+    }
     if (event.kind == 11) {
         ui.display_dirty = true;
         native.render.displayChanged();
@@ -1231,7 +1565,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             ui.request.height = height;
             ui.request.revision += 1;
         }
-        state.controller.start(state.catalog.count, ui.request.index, &ui.request);
+        state.controller.start(if (state.config.multiwindow) 1 else state.catalog.count, ui.request.index, &ui.request);
         if (state.config.recovery_test and state.catalog.count < 2) return error.RecoveryTestNeedsTwoImages;
         state.controller_ready.store(true, .release);
         ui.ready = true;
@@ -1257,7 +1591,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             }
         }
         var menu_action: ?actions.Action = null;
-        if (!state.controller.settings.mouse_configured and event.kind == 6 and event.key == 3) {
+        if (state.controller.settings.menus and !state.controller.settings.mouse_configured and event.kind == 6 and event.key == 3) {
             state.controller.held_advance.cancel();
             ui.menu.open = !ui.menu.open;
             ui.menu.x = @intFromFloat(event.x);
@@ -1340,7 +1674,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             effect.changed = true;
         }
         if (event.kind == 2 and event.key > 0 and event.key <= 65535) {
-            if (state.controller.settings.lookup(@intCast(event.key), modifiers(event.modifiers))) |action| {
+            if (if (event.process_navigation) (if (event.key == 'n') actions.Action.next else if (event.key == 'p') actions.Action.previous else actions.Action.reload) else state.controller.settings.lookup(@intCast(event.key), modifiers(event.modifiers))) |action| {
                 if (action == .next or action == .previous) {
                     const direction: @import("navigation.zig").HeldAdvance.Direction = if (action == .next) .next else .previous;
                     if (event.repeated) {
@@ -1358,7 +1692,20 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         }
         if (event.kind == 3 and event.y != 0) effect = state.controller.step(event.y > 0, false, &ui.request);
         if (event.kind == 8) {
-            if (ui.ignore_click) ui.ignore_click = false else if (event.key == 1) effect = state.controller.step(false, false, &ui.request) else if (event.key == 2) effect = state.controller.apply(.actual, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
+            if (ui.ignore_click) ui.ignore_click = false else if (event.key == 1) {
+                if (state.config.sheet.mode == .thumbnails and ui.displayed_index != null) {
+                    const view = displaySnapshot(state, ui, ui.request.view);
+                    if (state.gallery.imageAt(&state.catalog, (event.x - view.offset_x) / view.zoom, (event.y - view.offset_y) / view.zoom)) |tile| {
+                        const command = state.controller.settings.hooks[0];
+                        if (command.len == 0) {
+                            _ = native.input.openPath(tile.entry.path.ptr);
+                        } else if (!ui.hook_queued) {
+                            ui.pending_hook = .{ .kind = .thumbnail, .template = command, .snapshot = tile.snapshot(view, state.gallery.original_count) };
+                            ui.hook_queued = true;
+                        }
+                    }
+                } else effect = state.controller.step(state.controller.settings.tap_zones and event.x < @as(f32, @floatFromInt(ui.request.width)) / 2, false, &ui.request);
+            } else if (event.key == 2) effect = state.controller.apply(.actual, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
         }
         if (event.kind == 12) ui.ignore_click = false;
         if (event.kind == 9) {
@@ -1389,14 +1736,18 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
                 .open => {
                     native.input.openDialog(if (event.modifiers & 1 != 0) .directories else .files, if (ui.ready) state.catalog.entries[ui.request.index].path else state.config.paths[0]);
                 },
-                .trash, .reveal, .external => if (ui.displayed_index == ui.request.index and state.controller.shown_index == ui.request.index and !ui.hook_queued) {
+                .trash, .reveal, .external, .save_image, .rotate_left, .rotate_right, .mirror_horizontal, .mirror_vertical => if (!event.repeated and ui.displayed_index == ui.request.index and state.controller.shown_index == ui.request.index and !ui.hook_queued) {
                     const job: HookJob = .{
                         .kind = switch (action) {
                             .trash => .trash,
                             .reveal => .reveal,
-                            else => .external,
+                            .save_image => .save_image,
+                            .external => .external,
+                            else => .edit_image,
                         },
-                        .snapshot = .{ .path = state.catalog.entries[ui.request.index].path },
+                        .snapshot = displaySnapshot(state, ui, ui.request.view),
+                        .mirror = ui.request.mirror,
+                        .edit = view_actions.editOrientation(action) orelse .identity,
                         .index = ui.request.index,
                         .revision = state.controller.selection_serial,
                         .source_stamp = ui.displayed_stamp,
@@ -1412,15 +1763,25 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
                     }
                     effect.changed = true;
                 },
+                .toggle_exif => {
+                    ui.text.exif_visible = !ui.text.exif_visible;
+                    state.text_work.cancel();
+                    effect.changed = true;
+                },
+                .toggle_caption => editCaption(state, ui),
+                .toggle_pointer => state.controller.settings.hide_pointer = !state.controller.settings.hide_pointer,
                 .info => {
-                    state.controller.info = !state.controller.info;
+                    if (ui.text.info != null) {
+                        ui.text.info_visible = !ui.text.info_visible;
+                        state.text_work.cancel();
+                    } else state.controller.info = !state.controller.info;
                     effect.changed = true;
                 },
                 .help => {
                     state.controller.help = !state.controller.help;
                     effect.changed = true;
                 },
-                .menu => {
+                .menu => if (state.controller.settings.menus) {
                     ui.menu.open = !ui.menu.open;
                     ui.menu.layout(ui.request.width, ui.request.height, native.render.contentScale());
                     effect.changed = true;
@@ -1438,10 +1799,13 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
                     effect.changed = true;
                 },
                 .save_filelist => if (!event.repeated) {
-                    _ = state.filelist_export.queue(state.catalog.entries[0..state.catalog.count], state.controller.order[0..state.controller.count]);
+                    if (state.gallery.layout != null) {
+                        ui.notice_text = "File list export is unavailable in contact sheet modes";
+                        effect.changed = true;
+                    } else _ = state.filelist_export.queue(state.catalog.entries[0..state.catalog.count], state.controller.order[0..state.controller.count]);
                 },
                 .resize_window => {
-                    if (ui.base_width > 0) native.window.resizeImage(@intFromFloat(ui.source.width), @intFromFloat(ui.source.height));
+                    if (ui.base_width > 0) native.window.resizeImage(@intFromFloat(ui.source.width), @intFromFloat(ui.source.height), !state.controller.settings.no_screen_clip);
                 },
                 else => {
                     ui.notice_text = std.fmt.bufPrint(&ui.notice, "Action not available on Linux yet: {s}", .{@tagName(action)}) catch "Action unavailable";
@@ -1460,17 +1824,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             if (action.body().len > 0 and ui.displayed_index == ui.request.index and state.controller.shown_index == ui.request.index and !ui.hook_queued) {
                 ui.pending_hook.kind = .shell;
                 ui.pending_hook.template = action.*;
-                ui.pending_hook.snapshot = (hooks.Snapshot{
-                    .path = state.catalog.entries[ui.request.index].path,
-                    .width = ui.base_width,
-                    .height = ui.base_height,
-                    .bytes = @intCast(@max(0, if (ui.displayed_stamp) |stamp| stamp.bytes else state.catalog.entries[ui.request.index].bytes)),
-                    .index = state.controller.position + 1,
-                    .count = state.controller.count,
-                    .rotation = ui.request.rotation,
-                    .playing = state.controller.playing,
-                    .pid = posix.getpid(),
-                }).withView(ui.request.view, .{ .width = @floatFromInt(ui.request.width), .height = @floatFromInt(ui.request.height) });
+                ui.pending_hook.snapshot = displaySnapshot(state, ui, ui.request.view);
                 ui.pending_hook.index = ui.request.index;
                 ui.pending_hook.reload = action.reload;
                 ui.pending_hook.revision = state.controller.selection_serial;
@@ -1556,7 +1910,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         ui.request.revision += 1;
         ui.dirty = true;
     }
-    if (ui.ready and ui.trash_confirmation == null) {
+    if (ui.ready and ui.trash_confirmation == null and ui.caption_editor.path == null) {
         // A refresh interval after submission leaves each selected image on
         // screen for a frame. GPU presentation uses FIFO without waiting here.
         if (state.controller.held_advance.take(runtime.now() - native.types.current().refresh_interval)) |direction| {
@@ -1573,16 +1927,36 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             ui.dirty = true;
         }
     }
+    if (state.caption_write.take()) |saved| {
+        ui.text_result = null;
+        state.text_work.cancel();
+        ui.notice_text = if (saved) "Caption saved" else "Could not save caption";
+        ui.request.revision += 1;
+        ui.dirty = true;
+    }
+    if (ui.ready) refreshText(state, ui);
     if (ui.ready and ui.dirty) {
         ui.request.menu = ui.menu;
         state.controller.snapshotNavigation(&ui.request);
         makeOverlay(state, &ui.request, ui.notice_text);
+        if (ui.caption_editor.path != null) {
+            overlayText(&ui.request, "Caption (Enter saves, Ctrl+Enter adds a line, Escape cancels)\n{s}\n", .{ui.caption_editor.draft.bytes()});
+        } else if (displayedText(state, ui)) |extra| for ([_][]const u8{ extra.caption.bytes(), extra.camera.bytes(), extra.info.bytes() }) |line| {
+            if (line.len > 0) overlayText(&ui.request, "{s}\n", .{line});
+        };
         if (state.lock.tryLock()) {
             if (state.distant_prefetch) |id| if (ui.request.selection_serial != state.request.selection_serial and ui.request.index != id) state.distant_cancel.store(true, .release);
+            const selected = &state.entries[ui.request.index];
+            if (state.catalog.entries[ui.request.index].downloaded) {
+                if (selected.remote_selected and state.config.catalog_options.network.refresh_on_revisit and ui.request.index != state.request.index)
+                    ui.reload_pending = true;
+                if (ui.reload_pending) selected.remote_refresh = true;
+                selected.remote_selected = true;
+            }
             state.request = ui.request;
             state.requested_at = if (state.config.trace) runtime.now() else 0;
             if (ui.reload_pending) {
-                state.entries[ui.request.index].reload = true;
+                selected.reload = true;
                 state.reload_pending.store(true, .release);
                 ui.reload_pending = false;
             }
@@ -1646,8 +2020,15 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             // An automatic fit request does not yet contain its computed zoom.
             ui.dirty = true;
             var title: [8192]u8 = undefined;
-            const text = try std.fmt.bufPrintSentinel(&title, "{s} — {d}/{d} — {d}×{d} — {d:.1}%", .{ state.catalog.entries[result.index].path, state.controller.position + 1, state.controller.count, result.width, result.height, result.view.scale * 100 }, 0);
-            native.window.title(text.ptr);
+            const display_path = state.catalog.entries[result.index].display();
+            const text = try std.fmt.bufPrintSentinel(&title, "{s} — {d}/{d} — {d}×{d} — {d:.1}%", .{ display_path, state.controller.position + 1, state.controller.count, result.width, result.height, result.view.scale * 100 }, 0);
+            var custom: [8192]u8 = undefined;
+            const displayed_title = if (ui.text.title) |template| title_text: {
+                var snapshot = displaySnapshot(state, ui, result.view);
+                snapshot.path = display_path;
+                break :title_text hooks.formatList(&custom, template, snapshot) catch text;
+            } else text;
+            native.window.title(displayed_title.ptr);
             ui.presented += 1;
             if (ui.presented == 1) ui.first_version = result.image_version;
             if (state.config.native_recovery_test) {
@@ -1776,6 +2157,7 @@ const Application = struct {
     geometry: native.Geometry,
     persist_geometry: bool,
     filelist_data: input.FilelistBytes,
+    downloads: @import("remote.zig").Session,
 };
 fn configureNativeInput(life: *Life) void {
     const state = life.state;
@@ -1792,6 +2174,9 @@ fn configureNativeInput(life: *Life) void {
     state.config.draw_actions = life.draw_actions;
     state.config.catalog_options = life.catalog_options;
     state.config.output_dir = life.output_dir;
+    state.config.text = life.text;
+    state.config.initial_zoom = life.initial_zoom;
+    state.request.initial_zoom = life.initial_zoom;
     state.config.paused = life.paused;
     state.config.count = life.selection.count;
     const used = life.selection.used;
@@ -1820,7 +2205,7 @@ fn startSlot(slot: *Slot, initial: bool) !void {
     @memset(std.mem.asBytes(&slot.native), 0);
     native.types.bind(&slot.native);
     const cfg = if (initial) &slot.state.config else null;
-    if (native.window.open(@intFromBool(if (cfg) |value| value.software else slot.life.software), @intFromBool(if (cfg) |value| value.fullscreen else false), @intFromBool(if (cfg) |value| value.borderless else false)) != 0) {
+    if (native.window.open(@intFromBool(if (cfg) |value| value.software else slot.life.software), @intFromBool(if (cfg) |value| value.fullscreen and value.sheet.mode != .thumbnails else slot.life.fullscreen), @intFromBool(if (cfg) |value| value.borderless else slot.life.borderless)) != 0) {
         native.render.contextFinish();
         native.window.close();
         return error.WindowFailed;
@@ -1833,10 +2218,15 @@ fn startSlot(slot: *Slot, initial: bool) !void {
     slot.life.context = &slot.native;
     if (initial) {
         slot.state.context = &slot.native;
+        slot.native.background_color = slot.state.config.settings.background_color;
+        setFonts(&slot.native, slot.state.config.text);
         native.window.restore(&slot.life.geometry);
-        if (slot.state.config.geometry) |geometry| native.window.geometry(geometry);
+        if (slot.state.config.geometry) |geometry| native.window.geometryWithClip(geometry, !slot.state.config.settings.no_screen_clip);
         native.window.size(&slot.state.request.width, &slot.state.request.height);
-    } else native.window.size(&slot.life.width, &slot.life.height);
+    } else {
+        if (slot.life.initial_geometry) |geometry| native.window.geometryWithClip(geometry, !slot.life.settings.no_screen_clip);
+        native.window.size(&slot.life.width, &slot.life.height);
+    }
     slot.ui.initialized = false;
     slot.status = .starting;
     const coordinator = try std.Thread.spawn(.{}, windowCoordinator, .{&slot.life});
@@ -1853,11 +2243,85 @@ fn closeSlot(slot: *Slot) void {
         slot.ui.pending = .{};
         slot.ui.retiring = native.Frame{};
     }
+    if (slot.ui.initialized) slot.state.text_work.cancel();
     slot.status = .closing;
     slot.life.quit.store(true, .release);
 }
 fn closeAll(application: *Application) void {
     for (&application.slots) |*slot| closeSlot(slot);
+}
+fn openIndexedWindows(application: *Application, count: *usize) !void {
+    const first = &application.slots[0].state;
+    const cfg = &first.config;
+    const entries = first.catalog.entries[1..first.catalog.count];
+    for (entries, application.slots[1..first.catalog.count]) |image, *slot| {
+        slot.life = .{
+            .state = &slot.state,
+            .prepare = true,
+            .software = cfg.software,
+            .workers = cfg.workers,
+            .settings = cfg.settings,
+            .prefetch = cfg.prefetch,
+            .aggressive = cfg.aggressive,
+            .trace = cfg.trace,
+            .fullscreen = cfg.fullscreen,
+            .borderless = cfg.borderless,
+            .initial_geometry = cfg.geometry,
+            .initial_zoom = cfg.initial_zoom,
+            .text = cfg.text,
+            .output_dir = cfg.output_dir,
+            .draw_actions = cfg.draw_actions,
+            .filename = cfg.draw_filename,
+            .view = .initial(cfg.settings.fit, cfg.initial_zoom),
+            .paused = cfg.paused,
+            .nearest = first.request.nearest,
+        };
+        slot.life.selection.count = 1;
+        slot.life.selection.used = @intCast(image.path.len + 1);
+        slot.life.selection.offsets[0] = 0;
+        @memcpy(slot.life.selection.bytes[0..image.path.len], image.path);
+        slot.life.selection.bytes[image.path.len] = 0;
+        startSlot(slot, false) catch |err| {
+            slot.status = .vacant;
+            return err;
+        };
+        count.* += 1;
+    }
+}
+var pending_signal: std.atomic.Value(u8) = .init(0);
+fn viewerSignal(number: c_int) callconv(.c) void {
+    const request: u8 = switch (number) {
+        posix.SIGUSR1 => 1,
+        posix.SIGUSR2 => 2,
+        else => 3,
+    };
+    pending_signal.store(request, .release);
+}
+fn focusedWindow(application: *Application) ?*Slot {
+    const c = native.types.c;
+    if (c.SDL_GetKeyboardFocus()) |window| {
+        if (findSlot(application, c.SDL_GetWindowID(window))) |slot| return slot;
+    }
+    for (&application.slots) |*slot| if (slot.status == .active) return slot;
+    return null;
+}
+fn processEvent(application: *Application, terminal: *const process_input.Terminal, incoming: *native.Event) void {
+    if (incoming.kind != 0) return;
+    const signal = pending_signal.swap(0, .acq_rel);
+    if (signal == 3) {
+        incoming.kind = 10;
+        return;
+    }
+    if (signal == 0 and terminal.original == null) return;
+    const window = focusedWindow(application) orelse return;
+    if (signal != 0) {
+        incoming.* = .{ .window_id = window.id, .kind = 2, .key = if (window.ui.initialized and window.state.controller.count == 1) 'r' else if (signal == 1) 'n' else 'p', .process_navigation = true };
+    } else if (terminal.next()) |key| {
+        const key_modifiers = key.modifiers;
+        incoming.* = .{ .window_id = window.id, .kind = 2, .key = key.value, .modifiers = @as(u32, @intFromBool(key_modifiers & actions.shift != 0)) |
+            (@as(u32, @intFromBool(key_modifiers & actions.control != 0)) << 1) |
+            (@as(u32, @intFromBool(key_modifiers & actions.option != 0)) << 2) };
+    }
 }
 fn viewer(application: *Application) !void {
     const first = &application.slots[0];
@@ -1874,7 +2338,24 @@ fn viewer(application: *Application) !void {
         native.window.shutdown();
     }
     try startSlot(first, true);
+    var terminal: process_input.Terminal = .{};
+    if (!(if (first.state.config.filelist) |file| std.mem.eql(u8, file, "-") else false)) _ = terminal.enable();
+    defer terminal.disable();
+    const previous_next = posix.signal(posix.SIGUSR1, viewerSignal);
+    const previous_prev = posix.signal(posix.SIGUSR2, viewerSignal);
+    const previous_int = if (terminal.original != null) posix.signal(posix.SIGINT, viewerSignal) else null;
+    const previous_term = if (terminal.original != null) posix.signal(posix.SIGTERM, viewerSignal) else null;
+    defer {
+        _ = posix.signal(posix.SIGUSR1, previous_next);
+        _ = posix.signal(posix.SIGUSR2, previous_prev);
+        if (terminal.original != null) {
+            _ = posix.signal(posix.SIGINT, previous_int);
+            _ = posix.signal(posix.SIGTERM, previous_term);
+        }
+    }
     var live: usize = 1;
+    var multiwindow_pending = first.state.config.multiwindow;
+    var pointer_hidden = false;
     while (live > 0) {
         var incoming: native.Event = undefined;
         var timeout_ms: c_int = 8;
@@ -1886,7 +2367,26 @@ fn viewer(application: *Application) !void {
             }
         };
         native.input.eventWithTimeout(&incoming, timeout_ms);
+        processEvent(application, &terminal, &incoming);
         if (incoming.kind == 10) closeAll(application);
+        const sdl = native.types.c;
+        const focus = sdl.SDL_GetMouseFocus();
+        const focused = if (focus != null) findSlot(application, sdl.SDL_GetWindowID(focus)) else null;
+        const hide_pointer = if (focused) |slot| slot.ui.initialized and slot.state.controller.settings.hide_pointer else false;
+        if (hide_pointer != pointer_hidden) pointer_hidden = if (hide_pointer) sdl.SDL_HideCursor() else !sdl.SDL_ShowCursor();
+        if (multiwindow_pending and first.status != .closing and first.state.indexed.load(.acquire)) {
+            multiwindow_pending = false;
+            openIndexedWindows(application, &live) catch |err| {
+                output("multiwindow: {s}\n", .{@errorName(err)});
+                application.failed = true;
+                closeAll(application);
+            };
+        }
+        if (multiwindow_pending and first.state.index_failed.load(.acquire)) {
+            multiwindow_pending = false;
+            application.failed = true;
+            closeAll(application);
+        }
         for (&application.slots) |*slot| {
             if (slot.status == .vacant) continue;
             const phase = slot.life.phase.load(.acquire);
@@ -1970,6 +2470,12 @@ fn viewer(application: *Application) !void {
                         life.view = if (life.settings.keep_view) source.ui.request.view else .{ .mode = life.settings.fit };
                         life.catalog_options = source.state.config.catalog_options;
                         life.output_dir = source.state.config.output_dir;
+                        life.text = source.ui.text;
+                        life.text.mode = if (selection.from_thumbnail) .thumbview else .slideshow;
+                        if (selection.from_thumbnail) {
+                            life.text.title = source.ui.text.thumb_title;
+                            life.fullscreen = source.state.config.fullscreen;
+                        }
                         life.catalog_options.start_at = null;
                         life.catalog_options.browse = false;
                         life.selection.count = selection.count;
@@ -2115,14 +2621,60 @@ fn windowTest(application: *Application) !void {
     }
 }
 
+fn setWallpaper(state: *State, mode: desktop_wallpaper.Mode) !void {
+    if (state.config.xinerama_index != null) return error.PerMonitorWallpaperUnavailable;
+    if (state.catalog.count != 1) return error.WallpaperRequiresOneImage;
+    const c = native.types.c;
+    if (!c.SDL_InitSubSystem(c.SDL_INIT_VIDEO)) return error.NoDisplay;
+    defer c.SDL_QuitSubSystem(c.SDL_INIT_VIDEO);
+    const display = c.SDL_GetCurrentDisplayMode(c.SDL_GetPrimaryDisplay());
+    if (display == null or display.*.w <= 0 or display.*.h <= 0) return error.NoDisplay;
+    const width = display.*.w;
+    const height = display.*.h;
+    const image = try decode(state.catalog.entries[0].path);
+    defer image.destroy();
+    const directory = try state.catalog.downloads.?.workDir();
+    var staged: image_output.Temporary = .{};
+    defer staged.deinit();
+    try staged.create(directory, .png);
+
+    if (mode == .tile or mode == .scale) {
+        var composed: ?*c.VipsImage = null;
+        defer native.types.unref(composed);
+        if (mode == .tile) {
+            const across = std.math.divCeil(c_int, width, @intCast(image.pixels.width)) catch return error.InvalidDisplay;
+            const down = std.math.divCeil(c_int, height, @intCast(image.pixels.height)) catch return error.InvalidDisplay;
+            var repeated: ?*c.VipsImage = null;
+            defer native.types.unref(repeated);
+            if (c.vips_replicate(image.pixels.image, &repeated, across, down, @as(?*anyopaque, null)) != 0) return error.RenderFailed;
+            if (c.vips_extract_area(repeated, &composed, 0, 0, width, height, @as(?*anyopaque, null)) != 0) return error.RenderFailed;
+        } else if (c.vips_thumbnail_image(image.pixels.image, &composed, width, "height", height, "size", @as(c_int, c.VIPS_SIZE_FORCE), @as(?*anyopaque, null)) != 0) return error.RenderFailed;
+        if (c.vips_image_write_to_file(composed, staged.path().ptr, @as(?*anyopaque, null)) != 0) return error.ImageOutputFailed;
+    } else {
+        const screen: desktop_wallpaper.Size = .{ .width = @intCast(width), .height = @intCast(height) };
+        const source_size: desktop_wallpaper.Size = .{ .width = image.pixels.width, .height = image.pixels.height };
+        const box = desktop_wallpaper.placement(mode, screen, source_size, state.config.geometry);
+        var frame: native.Frame = .{};
+        defer native.render.free(&frame);
+        const factor = box.width / @as(f64, @floatFromInt(image.pixels.width));
+        if (native.render.prepare(&image.pixels, .{ .width = width, .height = height, .x = box.x, .y = box.y, .scale = factor, .nearest = state.config.settings.nearest }, "", false, &frame) != 0) return error.RenderFailed;
+        if (native.render.save(&frame, staged.path().ptr) != 0) return error.ImageOutputFailed;
+    }
+    const fd = posix.open(staged.path().ptr, posix.O_RDONLY | posix.O_CLOEXEC);
+    if (fd < 0) return error.ImageOutputFailed;
+    defer _ = posix.close(fd);
+    try native.desktop.setWallpaper(fd);
+}
 fn headless(state: *State) !void {
     try index(state);
+    if (state.config.wallpaper) |mode| return setWallpaper(state, mode);
     if (state.config.listing != .none) {
         const matched = try @import("listings.zig").run(state.config.listing, &state.catalog, catalogInfo, catalogLoadable, state.config.settings.hooks[0]);
         try saveFilelist(state);
         if (!matched) return error.ClassificationMismatch;
         return;
     }
+    if (state.config.sheet.output_only) return;
     if (state.catalog.count != 1) return error.BenchmarkRequiresOneImage;
     const start = runtime.now();
     const image = try decode(state.catalog.entries[0].path);
@@ -2152,15 +2704,19 @@ pub fn run(args: []const [*:0]const u8) !void {
     application.reclaimed = 0;
     const state = &application.slots[0].state;
     initialize(state);
+    application.downloads = .{ .transfer = @import("network.zig").download };
+    defer application.downloads.deinit();
+    state.catalog.downloads = &application.downloads;
     defer native.render.free(&state.result.pixels);
     var theme: input.Theme = .{};
     const arguments = theme.load(args) catch return error.InvalidArguments;
-    const proceed = parse(state, arguments, &application.filelist_data) catch |err| {
+    var fonts: [3]typography.ResolvedFont = @splat(.{});
+    const proceed = parse(state, arguments, &application.filelist_data, &fonts) catch |err| {
         output("arguments: {s}\n", .{@errorName(err)});
         return error.InvalidArguments;
     };
     if (!proceed) return;
-    if (state.config.listing == .paths and !state.config.catalog_options.needsInfo()) return headless(state);
+    if (state.config.listing == .paths and !state.config.catalog_options.preload and !state.config.catalog_options.needsInfo()) return headless(state);
     configureController(state);
     if (native.image.init(state.config.workers) != 0) return error.DecoderInitFailed;
     defer native.shutdown();
@@ -2168,7 +2724,7 @@ pub fn run(args: []const [*:0]const u8) !void {
         native.image.formats();
         return;
     }
-    if (state.config.benchmark or state.config.listing != .none) try headless(state) else {
+    if (state.config.benchmark or state.config.listing != .none or state.config.sheet.output_only or state.config.wallpaper != null) try headless(state) else {
         application.geometry = std.mem.zeroes(native.Geometry);
         const cfg = &state.config;
         application.persist_geometry = cfg.geometry == null and cfg.test_keys == null and cfg.test_open == null and cfg.window_test == null and

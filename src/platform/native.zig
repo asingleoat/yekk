@@ -42,6 +42,10 @@ pub extern "c" fn CFNumberGetTypeID() usize;
 pub extern "c" fn CFArrayGetCount(Ref) isize;
 pub extern "c" fn CFArrayGetValueAtIndex(Ref, isize) Ref;
 pub extern "c" fn CFStringGetCString(Ref, [*]u8, isize, u32) u8;
+pub extern "c" var kCTFontNameAttribute: Ref;
+pub extern "c" fn CTFontManagerCreateFontDescriptorsFromURL(Ref) ?Ref;
+pub extern "c" fn CTFontDescriptorCopyAttribute(Ref, Ref) ?Ref;
+pub extern "c" fn CTFontManagerRegisterFontsForURL(Ref, u32, ?*?Ref) bool;
 pub extern "c" var kCFBooleanTrue: Ref;
 pub extern "c" var kCFBooleanFalse: Ref;
 pub extern "c" fn CGImageSourceCreateWithURL(Ref, ?Ref) ?Ref;
@@ -68,7 +72,9 @@ pub extern "c" fn CGImageGetBitsPerComponent(Ref) usize;
 pub extern "c" fn CGImageGetBitsPerPixel(Ref) usize;
 pub extern "c" fn CGImageGetBitmapInfo(Ref) u32;
 pub extern "c" fn CGBitmapContextCreate(?*anyopaque, usize, usize, usize, usize, Ref, u32) ?Ref;
+pub extern "c" fn CGBitmapContextGetData(Ref) ?[*]u8;
 pub extern "c" fn CGContextDrawImage(Ref, Rect, Ref) void;
+pub extern "c" fn CGContextSetAlpha(Ref, f64) void;
 pub extern "c" fn CGContextScaleCTM(Ref, f64, f64) void;
 pub extern "c" fn CGBitmapContextCreateImage(Ref) ?Ref;
 pub extern "c" fn CGImageDestinationCreateWithURL(Ref, Ref, usize, ?Ref) ?Ref;
@@ -99,6 +105,14 @@ pub extern "c" fn pread(c_int, [*]u8, usize, i64) isize;
 pub extern "c" fn CFAbsoluteTimeGetCurrent() f64;
 pub const now = @import("runtime").now;
 extern "c" var _dispatch_source_type_memorypressure: u8;
+extern "c" var _dispatch_source_type_signal: u8;
+extern "c" var _dispatch_source_type_read: u8;
+pub fn signalType() *anyopaque {
+    return &_dispatch_source_type_signal;
+}
+pub fn readType() *anyopaque {
+    return &_dispatch_source_type_read;
+}
 pub fn pressureType() *anyopaque {
     return &_dispatch_source_type_memorypressure;
 }

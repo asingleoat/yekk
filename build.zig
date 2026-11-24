@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) !void {
     root.addImport("pnm", pnm);
     root.addImport("png", png);
     root.addImport("jpeg", jpeg);
+    try linkNetwork(b, root, target, optimize);
     codecs.addTo(root);
     root.addImport("raster", raster);
     const geometry = b.createModule(.{ .root_source_file = b.path("src/geometry.zig"), .target = target, .optimize = optimize });
@@ -238,7 +239,7 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     root.addImport("geometry", geometry);
     const color = b.createModule(.{ .root_source_file = b.path("src/color.zig"), .target = target, .optimize = optimize });
     const bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/linux-bindings.h"), .target = target, .optimize = optimize });
-    const include_flags = b.run(&.{ "pkg-config", "--cflags-only-I", "vips", "sdl3", "lcms2", "x11", "xi", "xext", "xfixes" });
+    const include_flags = b.run(&.{ "pkg-config", "--cflags-only-I", "vips", "sdl3", "lcms2", "fontconfig", "x11", "xi", "xext", "xfixes" });
     var includes = std.mem.tokenizeAny(u8, include_flags, " \t\r\n");
     while (includes.next()) |flag| {
         if (!std.mem.startsWith(u8, flag, "-I")) return error.UnexpectedPkgConfigFlag;
@@ -259,6 +260,8 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     native.addImport("png", png);
     const jpeg = try jpegModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, portable);
     native.addImport("jpeg", jpeg);
+    root.addImport("jpeg", jpeg);
+    try linkNetwork(b, root, target, optimize);
     const runtime_module = runtime_options.createModule();
     native.addImport("build_options", runtime_module);
     try linkLinux(b, native, portable);
@@ -311,13 +314,16 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     decoder_tests.addImport("source", source);
     decoder_tests.addImport("geometry", geometry);
     decoder_tests.addImport("linux", native);
+    decoder_tests.addImport("jpeg", jpeg);
+    decoder_tests.addImport("png", png);
+    try linkNetwork(b, decoder_tests, target, optimize);
     decoder_tests.addImport("build_options", runtime_module);
     try linkLinux(b, decoder_tests, portable);
     if (b.option(bool, "test-desktop", "Build private Linux desktop interoperability fixtures") orelse false) {
         const fixture_step = b.step("build-linux-fixtures", "Build Zig desktop interoperability fixtures");
         const x11 = b.addTranslateC(.{ .root_source_file = b.path("scripts/linux-x11-bindings.h"), .target = target, .optimize = optimize });
         const xflags = b.run(&.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "x11" });
-        inline for (.{ "linux-file-manager-test", "linux-x11-fixture" }) |name| {
+        inline for (.{ "linux-file-manager-test", "linux-wallpaper-test", "linux-x11-fixture" }) |name| {
             const fixture = b.createModule(.{ .root_source_file = b.path("scripts/" ++ name ++ ".zig"), .target = target, .optimize = optimize, .link_libc = true });
             fixture.addImport("linux_bindings", bindings_module);
             if (comptime std.mem.eql(u8, name, "linux-x11-fixture")) {
@@ -351,9 +357,9 @@ fn linkLinux(b: *std.Build, module: *std.Build.Module, portable: bool) !void {
     // SDL's .pc includes linker switches Zig's pkg-config parser cannot yet
     // consume. Query the structured flag subsets and explicitly retain rpaths.
     const flags = b.run(if (portable)
-        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11", "libtiff-4" }
+        &.{ "pkg-config", "--static", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "fontconfig", "x11", "libtiff-4" }
     else
-        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "x11" });
+        &.{ "pkg-config", "--cflags-only-I", "--libs-only-L", "--libs-only-l", "vips", "sdl3", "lcms2", "fontconfig", "x11" });
     try linkLinuxLibraries(b, module, portable, flags);
 }
 
@@ -395,7 +401,7 @@ fn linkNative(b: *std.Build, module: *std.Build.Module, sdk: []const u8) void {
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
     module.linkSystemLibrary("objc", .{});
-    inline for (.{ "AppKit", "Foundation", "QuartzCore", "CoreGraphics", "CoreImage", "Metal", "IOSurface", "ImageIO", "CoreFoundation", "Accelerate" }) |framework| module.linkFramework(framework, .{});
+    inline for (.{ "AppKit", "Foundation", "QuartzCore", "CoreGraphics", "CoreImage", "CoreText", "Metal", "IOSurface", "ImageIO", "CoreFoundation", "Accelerate" }) |framework| module.linkFramework(framework, .{});
 }
 
 fn tiffModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, system: *std.Build.Module, services: *std.Build.Module, portable: bool, raster: *std.Build.Module, source: *std.Build.Module) !*std.Build.Module {
@@ -492,6 +498,21 @@ fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         try linkLinuxLibraries(b, jpeg, portable, b.run(if (portable) &.{ "pkg-config", "--static", "--libs-only-L", "--libs-only-l", "libturbojpeg" } else &.{ "pkg-config", "--libs-only-L", "--libs-only-l", "libturbojpeg" }));
     }
     return jpeg;
+}
+
+fn linkNetwork(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !void {
+    const include = b.graph.environ_map.get("YEKK_CURL_INCLUDE") orelse return error.EnterNixDevelopmentShell;
+    const bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/curl-bindings.h"), .target = target, .optimize = optimize });
+    bindings.addSystemIncludePath(.{ .cwd_relative = include });
+    if (target.result.os.tag == .macos) {
+        const sdk = b.graph.environ_map.get("SDKROOT") orelse return error.EnterNixDevelopmentShell;
+        bindings.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
+    }
+    const library = b.graph.environ_map.get("YEKK_CURL_LIB") orelse return error.EnterNixDevelopmentShell;
+    module.addLibraryPath(.{ .cwd_relative = library });
+    module.addRPath(.{ .cwd_relative = library });
+    module.addImport("curl_bindings", bindings.createModule());
+    module.linkSystemLibrary("curl", .{ .use_pkg_config = .no });
 }
 
 const PhotoModules = struct {

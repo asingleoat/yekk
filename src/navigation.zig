@@ -53,7 +53,7 @@ pub fn step(current: usize, count: usize, delta: isize, timed: bool, settings: *
     if (count == 0) return .stay;
     const raw = @as(isize, @intCast(current)) + delta;
     const end = raw < 0 or raw >= count;
-    if (timed and end) {
+    if (end and (timed or settings.on_last == .hold or (settings.on_last == .quit and raw >= count))) {
         switch (settings.on_last) {
             .quit => return .quit,
             .hold => return .hold,
@@ -96,8 +96,10 @@ test "manual boundaries and slideshow endpoints use one policy" {
     try std.testing.expect(step(0, 3, -1, false, &settings) == .stay);
     settings.on_last = .hold;
     try std.testing.expect(step(2, 3, 1, true, &settings) == .hold);
+    try std.testing.expect(step(0, 3, -1, false, &settings) == .hold);
     settings.on_last = .quit;
     try std.testing.expect(step(2, 3, 1, true, &settings) == .quit);
+    try std.testing.expect(step(2, 3, 1, false, &settings) == .quit);
     settings.on_last = .@"resume";
     settings.slideshow_loop = true;
     const next = step(2, 3, 1, true, &settings).select;

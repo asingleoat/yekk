@@ -28,6 +28,24 @@ pub const Options = struct {
     hook_test: bool = false,
     filelist: ?[:0]const u8 = null,
     output_dir: ?[:0]const u8 = null,
+    text: @import("viewer_text.zig").Options = .{},
+    font_paths: @import("typography.zig").SearchPaths = .{},
+    multiwindow: bool = false,
+    sheet: @import("contact_sheet.zig").Options = .{},
+    wallpaper: ?@import("wallpaper.zig").Mode = null,
+    xinerama_index: ?usize = null,
+    primary_only: bool = false,
+    tap_zones: bool = false,
+    no_menus: bool = false,
+    no_screen_clip: bool = false,
+    hide_pointer: bool = false,
+    force_aliasing: bool = false,
+    edit: bool = false,
+    background: ?union(enum) { default, checks, color: [3]u8 } = null,
+    keep_http: bool = false,
+    insecure: bool = false,
+    refresh_http: bool = false,
+    scroll_step: ?f64 = null,
     reload_seconds: ?f64 = null,
 
     fit: ?core.ScaleMode = null,
@@ -118,6 +136,108 @@ pub const Options = struct {
         } else if (std.mem.eql(u8, name, "output-dir")) {
             if (value.len == 0) return error.EmptyOutputDirectory;
             self.output_dir = value;
+        } else if (std.mem.eql(u8, name, "title")) {
+            var buffer: [8192]u8 = undefined;
+            _ = try hooks.formatList(&buffer, value, .{ .path = "" });
+            self.text.title = value;
+        } else if (std.mem.eql(u8, name, "thumb-title")) {
+            var buffer: [8192]u8 = undefined;
+            _ = try hooks.formatList(&buffer, value, .{ .path = "" });
+            self.text.thumb_title = value;
+        } else if (std.mem.eql(u8, name, "font")) {
+            self.text.font = try @import("typography.zig").Font.parse(value);
+        } else if (std.mem.eql(u8, name, "fontpath")) {
+            try self.font_paths.add(value);
+        } else if (std.mem.eql(u8, name, "menu-font")) {
+            self.text.menu_font = try @import("typography.zig").Font.parse(value);
+        } else if (std.mem.eql(u8, name, "title-font")) {
+            self.sheet.title_font = try @import("typography.zig").Font.parse(value);
+        } else if (std.mem.eql(u8, name, "thumb-redraw")) {
+            self.sheet.redraw = try std.fmt.parseInt(u32, value, 10);
+        } else if (std.mem.eql(u8, name, "caption-path")) {
+            self.text.caption_dir = value;
+        } else if (std.mem.eql(u8, name, "draw-exif")) {
+            self.text.exif_visible = true;
+        } else if (std.mem.eql(u8, name, "info")) {
+            const hidden = value.len > 0 and value[0] == ';';
+            const command = if (hidden) value[1..] else value;
+            var buffer: [16384]u8 = undefined;
+            _ = try hooks.format(&buffer, command, .{ .path = "", .manifest = "manifest" });
+            self.text.info = if (command.len == 0) null else command;
+            self.text.info_visible = !hidden and command.len > 0;
+        } else if (std.mem.eql(u8, name, "multiwindow")) {
+            self.multiwindow = true;
+        } else if (std.mem.eql(u8, name, "edit")) {
+            self.edit = true;
+        } else if (std.mem.eql(u8, name, "force-aliasing")) {
+            self.force_aliasing = true;
+        } else if (std.mem.eql(u8, name, "hide-pointer")) {
+            self.hide_pointer = true;
+        } else if (std.mem.eql(u8, name, "no-menus")) {
+            self.no_menus = true;
+        } else if (std.mem.eql(u8, name, "no-screen-clip")) {
+            self.no_screen_clip = true;
+        } else if (std.mem.eql(u8, name, "tap-zones")) {
+            self.tap_zones = true;
+        } else if (std.mem.eql(u8, name, "scroll-step")) {
+            const step = try std.fmt.parseInt(i32, value, 10);
+            self.scroll_step = @floatFromInt(step);
+        } else if (std.mem.eql(u8, name, "auto-reload")) {
+            self.reload_seconds = 1;
+        } else if (std.mem.eql(u8, name, "cycle-once")) {
+            self.on_last = .quit;
+        } else if (std.mem.eql(u8, name, "quiet")) {
+            listing.quiet = true;
+        } else if (std.mem.eql(u8, name, "verbose")) {
+            listing.verbose = true;
+        } else if (std.mem.eql(u8, name, "preload")) {
+            listing.preload = true;
+        } else if (std.mem.eql(u8, name, "auto-rotate") or std.mem.eql(u8, name, "draw-tinted")) {
+            // Metadata orientation and tinted overlays are already enabled.
+        } else if (std.mem.eql(u8, name, "montage") or std.mem.eql(u8, name, "index") or std.mem.eql(u8, name, "fullindex") or std.mem.eql(u8, name, "thumbnails")) {
+            self.sheet.mode = std.meta.stringToEnum(@FieldType(@TypeOf(self.sheet), "mode"), name).?;
+        } else if (std.mem.eql(u8, name, "output") or std.mem.eql(u8, name, "output-only")) {
+            if (value.len == 0) return error.EmptyOutputPath;
+            self.sheet.destination = value;
+            self.sheet.output_only = std.mem.eql(u8, name, "output-only");
+        } else if (std.mem.eql(u8, name, "thumb-width")) {
+            self.sheet.thumb_width = try positiveDimension(value);
+        } else if (std.mem.eql(u8, name, "thumb-height")) {
+            self.sheet.thumb_height = try positiveDimension(value);
+        } else if (std.mem.eql(u8, name, "limit-width")) {
+            self.sheet.limit_width = try positiveDimension(value);
+        } else if (std.mem.eql(u8, name, "limit-height")) {
+            self.sheet.limit_height = try positiveDimension(value);
+        } else if (std.mem.eql(u8, name, "index-info")) {
+            var buffer: [8192]u8 = undefined;
+            _ = try hooks.formatList(&buffer, value, .{ .path = "" });
+            self.sheet.label = value;
+        } else if (std.mem.eql(u8, name, "bg")) {
+            self.sheet.background = value;
+        } else if (std.mem.eql(u8, name, "image-bg")) {
+            self.background = if (std.mem.eql(u8, value, "default")) .default else if (std.mem.eql(u8, value, "checks")) .checks else .{ .color = try colorValue(value) };
+        } else if (std.mem.eql(u8, name, "cache-thumbnails")) {
+            self.sheet.cache = true;
+        } else if (std.mem.eql(u8, name, "alpha")) {
+            self.sheet.opacity = try std.fmt.parseInt(u8, value, 10);
+        } else if (std.mem.eql(u8, name, "stretch")) {
+            self.sheet.stretch = true;
+        } else if (std.mem.eql(u8, name, "ignore-aspect")) {
+            self.sheet.ignore_aspect = true;
+        } else if (std.mem.startsWith(u8, name, "bg-")) {
+            self.wallpaper = std.meta.stringToEnum(@import("wallpaper.zig").Mode, name[3..]) orelse return false;
+        } else if (std.mem.eql(u8, name, "xinerama-index")) {
+            self.xinerama_index = try std.fmt.parseInt(usize, value, 10);
+        } else if (std.mem.eql(u8, name, "no-xinerama")) {
+            self.primary_only = true;
+        } else if (std.mem.eql(u8, name, "no-fehbg")) {
+            // Native desktop settings persist the selected image.
+        } else if (std.mem.eql(u8, name, "keep-http")) {
+            self.keep_http = true;
+        } else if (std.mem.eql(u8, name, "no-conversion-cache")) {
+            self.refresh_http = true;
+        } else if (std.mem.eql(u8, name, "insecure")) {
+            self.insecure = true;
         } else if (std.mem.eql(u8, name, "start-at")) {
             listing.start_at = value;
         } else if (std.mem.eql(u8, name, "on-last-slide")) {
@@ -167,6 +287,24 @@ pub const Options = struct {
         } else return false;
         return true;
     }
+    pub fn finish(self: *Options) !void {
+        if (self.sheet.destination != null and self.sheet.mode == .viewer) self.sheet.mode = .montage;
+        const modes = [_]bool{ self.wallpaper != null, self.sheet.mode != .viewer, self.listing != .none, self.multiwindow };
+        var count: u8 = 0;
+        for (modes) |enabled| count += @intFromBool(enabled);
+        if (count > 1) return error.ConflictingModes;
+    }
+    pub fn windowMode(self: *const Options) hooks.Mode {
+        return switch (self.sheet.mode) {
+            .viewer => if (self.multiwindow) .multiwindow else .slideshow,
+            .montage => .montage,
+            .index, .fullindex => .index,
+            .thumbnails => .thumbnails,
+        };
+    }
+    pub fn network(self: *const Options) @import("remote.zig").Options {
+        return .{ .keep_in = if (self.keep_http) self.output_dir orelse "." else null, .insecure = self.insecure, .refresh_on_revisit = self.refresh_http };
+    }
     pub fn apply(self: *const Options, settings: *actions.Settings) void {
         if (self.fit) |fit| settings.fit = if (self.auto_zoom and !self.scale_down and !(self.fullscreen and self.zoom == null)) switch (fit) {
             .fit => .enlarge,
@@ -181,6 +319,24 @@ pub const Options = struct {
         if (self.keep_view) settings.keep_view = true;
         if (self.slideshow) |slideshow| settings.interval = slideshow.seconds;
         if (self.zoom_step) |step| settings.zoom_step = step;
+        if (self.scroll_step) |step| settings.scroll_step = step;
+        if (self.no_menus) settings.menus = false;
+        if (self.no_screen_clip) settings.no_screen_clip = true;
+        if (self.tap_zones) settings.tap_zones = true;
+        if (self.hide_pointer) settings.hide_pointer = true;
+        if (self.force_aliasing) settings.nearest = true;
+        if (self.edit) settings.edit = true;
+        if (self.background) |background| switch (background) {
+            .default => {},
+            .checks => {
+                settings.checker = true;
+                settings.background_color = null;
+            },
+            .color => |color| {
+                settings.checker = false;
+                settings.background_color = color;
+            },
+        };
         if (self.on_last) |policy| {
             settings.on_last = policy;
             settings.slideshow_loop = true;
@@ -192,6 +348,32 @@ pub const Options = struct {
     }
 };
 
+fn colorValue(value: []const u8) ![3]u8 {
+    if (value.len > 0 and value[0] == '#') {
+        const width = (value.len - 1) / 3;
+        if (width == 0 or width > 4 or value.len != 1 + 3 * width) return error.InvalidBackgroundColor;
+        const max: u32 = (@as(u32, 1) << @as(u5, @intCast(width * 4))) - 1;
+        var rgb: [3]u8 = undefined;
+        for (&rgb, 0..) |*component, index| {
+            const number = try std.fmt.parseInt(u16, value[1 + index * width ..][0..width], 16);
+            component.* = @intCast((@as(u32, number) * 255 + max / 2) / max);
+        }
+        return rgb;
+    }
+    const named = .{
+        .{ "black", [3]u8{ 0, 0, 0 } },      .{ "white", [3]u8{ 255, 255, 255 } },
+        .{ "gray", [3]u8{ 190, 190, 190 } }, .{ "grey", [3]u8{ 190, 190, 190 } },
+        .{ "red", [3]u8{ 255, 0, 0 } },      .{ "green", [3]u8{ 0, 255, 0 } },
+        .{ "blue", [3]u8{ 0, 0, 255 } },     .{ "yellow", [3]u8{ 255, 255, 0 } },
+        .{ "cyan", [3]u8{ 0, 255, 255 } },   .{ "magenta", [3]u8{ 255, 0, 255 } },
+    };
+    inline for (named) |item| if (std.ascii.eqlIgnoreCase(item[0], value)) return item[1];
+    return error.InvalidBackgroundColor;
+}
+fn positiveDimension(value: []const u8) !u16 {
+    const size = try std.fmt.parseInt(u16, value, 10);
+    return if (size == 0) error.InvalidDimensions else size;
+}
 test "CLI overrides preserve option order, inheritance and explicit disabling" {
     var parsed: Options = .{};
     var listing: catalog.Options = .{};

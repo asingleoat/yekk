@@ -66,6 +66,10 @@ pub const Action = enum {
     background,
     resize_window,
     save_filelist,
+    toggle_exif,
+    toggle_caption,
+    toggle_pointer,
+    save_image,
 };
 pub const Binding = struct { key: u16, modifiers: usize = 0, action: Action };
 pub const command: usize = 1 << 20;
@@ -106,6 +110,8 @@ pub const defaults = [_]Binding{
     .{ .key = '7', .action = .action_7 },                              .{ .key = '8', .action = .action_8 },
     .{ .key = '9', .action = .action_9 },                              .{ .key = 'w', .modifiers = command, .action = .close },
     .{ .key = 'q', .modifiers = command, .action = .quit },            .{ .key = 'o', .modifiers = command, .action = .open },
+    .{ .key = 'o', .action = .toggle_pointer },                        .{ .key = 's', .action = .save_image },
+    .{ .key = 'e', .action = .toggle_exif },                           .{ .key = 'c', .action = .toggle_caption },
     .{ .key = 'l', .modifiers = shift, .action = .save_filelist },
 };
 pub const MouseAction = union(enum) {
@@ -140,6 +146,14 @@ pub const Settings = struct {
     wrap: bool = true,
     hooks: [10]hooks.Command = @splat(.{}),
     zoom_step: f64 = 1.25,
+    scroll_step: f64 = 64,
+    tap_zones: bool = false,
+    menus: bool = true,
+    no_screen_clip: bool = false,
+    nearest: bool = false,
+    edit: bool = false,
+    background_color: ?[3]u8 = null,
+    hide_pointer: bool = false,
     on_last: enum { @"resume", hold, quit } = .@"resume",
     keep_view: bool = false,
     watch: bool = false,

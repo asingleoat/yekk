@@ -31,7 +31,9 @@ const Cached = struct {
     version: u64 = 1,
     image_version: u64 = 0,
     failed_version: u64 = 0,
-    failure: ?decoder.Failure = null,
+    failure: ?anyerror = null,
+    remote_selected: bool = false,
+    remote_refresh: bool = false,
     older: ?usize = null,
     newer: ?usize = null,
     rotation: u2 = 0,
@@ -54,12 +56,13 @@ const Job = struct {
     id: usize = 0,
     version: u64 = 0,
     path: [:0]const u8 = "",
+    refresh_url: ?[:0]const u8 = null,
     edge: u32 = 0,
     workers: usize = 1,
     limits: decoder.Limits = .{},
     elapsed_ms: f64 = 0,
     image: ?*Image = null,
-    failure: ?decoder.Failure = null,
+    failure: ?anyerror = null,
 };
 const Retirement = union(enum) {
     image: *Image,
@@ -85,7 +88,7 @@ const Watch = struct {
     cursor: usize = 0,
     items: [16]struct { entry: Entry, stamp: Stamp } = undefined,
 };
-const Auxiliary = enum { reveal, external, trash, snapshot };
+const Auxiliary = enum { reveal, external, trash, snapshot, save_image, edit_image };
 const Aux = struct {
     busy: bool = false,
     kind: Auxiliary = .reveal,
@@ -93,9 +96,15 @@ const Aux = struct {
     success: bool = false,
     id: ?usize = null,
     native_image: ?n.Ref = null,
+    rotation: u2 = 0,
+    mirror: u2 = 0,
+    stamp: ?Stamp = null,
+    edit: @import("source").Orientation = .identity,
+    failure: ?anyerror = null,
 };
 const HookJob = struct {
     busy: bool = false,
+    thumbnail: bool = false,
     id: usize = 0,
     selection: u64 = 0,
     reload: bool = false,
@@ -108,6 +117,13 @@ const HookJob = struct {
     failure: ?anyerror = null,
     exists: bool = true,
 };
+const viewer_text = @import("viewer_text.zig");
+const process_input = @import("process_input.zig");
+const image_output = @import("image_output.zig");
+const contact_sheet = @import("contact_sheet.zig");
+const desktop_wallpaper = @import("wallpaper.zig");
+const typography = @import("typography.zig");
+const Font = typography.Font;
 const Cli = @import("cli.zig").Options;
 const Prepared = struct {
     source: *Image,
@@ -138,6 +154,9 @@ const State = struct {
     slot: usize = 0,
     native_inputs: O = nil,
     catalog: catalog.Catalog = .{},
+    gallery: contact_sheet.Gallery = .{},
+    sheet_preview: ?n.Ref = null,
+    sheet_preview_queued: std.atomic.Value(bool) = .init(false),
     input: [catalog.capacity][:0]const u8 = undefined,
     input_count: usize = 0,
     initial: [1]Entry = undefined,
@@ -190,6 +209,11 @@ const State = struct {
     filelist_saving: bool = false,
     filelist_saved: bool = false,
     filelist_failure: ?anyerror = null,
+    text: viewer_text.Options = .{},
+    text_work: viewer_text.Work = .{},
+    text_result: ?viewer_text.Result = null,
+    caption_editor: viewer_text.Editor = .{},
+    caption_write: viewer_text.CaptionWrite = .{},
     show_actions: bool = false,
     show_filename: bool = false,
     mouse_moved: bool = false,
@@ -226,6 +250,7 @@ const State = struct {
     view: O = nil,
     layer: O = nil,
     overlay: O = nil,
+    hidden_cursor: O = nil,
     delegate: O = nil,
     timer: O = nil,
     open_panel: O = nil,
@@ -294,12 +319,14 @@ const Control = struct {
     memory_recovering: bool = false,
     config_override: ?[:0]const u8 = null,
     output_dir: [:0]const u8 = ".",
+    terminal: process_input.Terminal = .{},
 };
 const Root = struct {
     sessions: [sessions.capacity]State,
     control: Control,
     renderer: presentation.Renderer,
     filelist_data: input.FilelistBytes,
+    downloads: @import("remote.zig").Session,
 };
 var root: *Root = undefined;
 var control: *Control = undefined;
@@ -352,6 +379,27 @@ fn cls(comptime name: [:0]const u8) objc.Class {
 }
 fn string(bytes: []const u8) O {
     return cls("NSString").msgSend(O, "alloc", .{}).msgSend(O, "initWithBytes:length:encoding:", .{ bytes.ptr, bytes.len, @as(usize, if (std.unicode.utf8ValidateSlice(bytes)) 4 else 5) });
+}
+fn textFont(font: ?Font, fallback: f64) O {
+    if (font) |face| {
+        const name = string(face.family);
+        defer name.release();
+        const value = cls("NSFont").msgSend(O, "fontWithName:size:", .{ name, @as(f64, @floatFromInt(face.points)) });
+        if (value.value != null) return value;
+        return cls("NSFont").msgSend(O, "systemFontOfSize:", .{@as(f64, @floatFromInt(face.points))});
+    }
+    return cls("NSFont").msgSend(O, "systemFontOfSize:", .{fallback});
+}
+fn resolveFont(path: [:0]const u8, buffer: []u8) ![]const u8 {
+    const font_url: n.Ref = @ptrCast(url(path).value orelse return error.InvalidFontFile);
+    const descriptors = n.CTFontManagerCreateFontDescriptorsFromURL(font_url) orelse return error.InvalidFontFile;
+    defer n.CFRelease(descriptors);
+    if (n.CFArrayGetCount(descriptors) == 0) return error.InvalidFontFile;
+    const name = n.CTFontDescriptorCopyAttribute(n.CFArrayGetValueAtIndex(descriptors, 0), n.kCTFontNameAttribute) orelse return error.InvalidFontFile;
+    defer n.CFRelease(name);
+    if (n.CFStringGetCString(name, buffer.ptr, @intCast(buffer.len), 0x08000100) == 0) return error.InvalidFontFile;
+    _ = n.CTFontManagerRegisterFontsForURL(font_url, 1, null);
+    return std.mem.sliceTo(buffer, 0);
 }
 fn setText(target: O, selector: [:0]const u8, text: []const u8) void {
     const value = string(text);
@@ -416,12 +464,19 @@ fn updateStatus(context: ?*anyopaque) callconv(.c) void {
     }
     if (s.window.value == null or s.closing) return;
     var buffer: [4096]u8 = undefined;
-    const shown = if (s.displayed != null) std.fs.path.basename(s.displayed_path) else "Yekk";
-    const target = if (s.desired) |id| std.fs.path.basename((entry(id) orelse return).path) else "";
+    const displayed = if (s.displayed) |id| entry(id) else null;
+    const shown = if (displayed) |item| std.fs.path.basename(item.display()) else "Yekk";
+    const target = if (s.desired) |id| std.fs.path.basename((entry(id) orelse return).display()) else "";
     const failed = if (s.desired) |id| s.cached[id].failed_version == s.cached[id].version else false;
     const render_pending = s.render_wanted != null and s.render_presented_revision != s.render_revision;
     const loading = render_pending or s.desired != null and (s.displayed != s.desired or (s.current != null and s.cached[s.desired.?].image_version != s.cached[s.desired.?].version));
-    const text = if (s.notice_len > 0) std.fmt.bufPrint(&buffer, "{s} — {s}", .{ shown, s.notice[0..s.notice_len] }) catch shown else if (s.settings.error_line != 0) std.fmt.bufPrint(&buffer, "{s} — config error on line {d}", .{ shown, s.settings.error_line }) catch shown else if (failed) std.fmt.bufPrint(&buffer, "{s} — {s}: {s}", .{ shown, target, @errorName(s.cached[s.desired.?].failure.?) }) catch shown else if (loading or (s.desired != null and s.current == null)) std.fmt.bufPrint(&buffer, "{s} — loading {s}", .{ shown, target }) catch shown else if (s.indexing and s.current == null) "Yekk — discovering images…" else if (s.current) |image| std.fmt.bufPrint(&buffer, "{s} — {d}/{d} · {d:.0}%{s}", .{ shown, (position(s.displayed.?) orelse 0) + 1, s.entries.len, s.geometry.scale * 100, if (image.width < image.source_width or image.height < image.source_height) " · preview" else "" }) catch shown else "Yekk — Command-O to open images";
+    const standard_title = if (s.notice_len > 0) std.fmt.bufPrint(&buffer, "{s} — {s}", .{ shown, s.notice[0..s.notice_len] }) catch shown else if (s.settings.error_line != 0) std.fmt.bufPrint(&buffer, "{s} — config error on line {d}", .{ shown, s.settings.error_line }) catch shown else if (failed) std.fmt.bufPrint(&buffer, "{s} — {s}: {s}", .{ shown, target, @errorName(s.cached[s.desired.?].failure.?) }) catch shown else if (s.indexing and s.gallery.progress.load(.acquire) > 0) std.fmt.bufPrint(&buffer, "Contact sheet {d}/{d}", .{ s.gallery.progress.load(.acquire), s.gallery.total.load(.acquire) }) catch "Contact sheet" else if (loading or (s.desired != null and s.current == null)) std.fmt.bufPrint(&buffer, "{s} — loading {s}", .{ shown, target }) catch shown else if (s.indexing and s.current == null) "Yekk — discovering images…" else if (s.current) |image| std.fmt.bufPrint(&buffer, "{s} — {d}/{d} · {d:.0}%{s}", .{ shown, (position(s.displayed.?) orelse 0) + 1, s.entries.len, s.geometry.scale * 100, if (image.width < image.source_width or image.height < image.source_height) " · preview" else "" }) catch shown else "Yekk — Command-O to open images";
+    var custom_buffer: [8192]u8 = undefined;
+    const text = if (s.text.title != null and s.notice_len == 0 and !failed and !loading and s.current != null) title: {
+        var snapshot = displaySnapshot(s.displayed.?, s.current.?);
+        if (displayed) |item| snapshot.path = item.display();
+        break :title hooks.formatList(&custom_buffer, s.text.title.?, snapshot) catch standard_title;
+    } else standard_title;
     setText(s.window, "setTitle:", text);
     if (failed) s.held_advance.presented(n.CACurrentMediaTime());
     updateOverlay();
@@ -483,7 +538,7 @@ fn released(context: ?*anyopaque) callconv(.c) void {
     s.releaser.busy = false;
     wakeAll();
 }
-fn isMemoryFailure(failure: ?decoder.Failure) bool {
+fn isMemoryFailure(failure: ?anyerror) bool {
     return if (failure) |err| err == error.OutOfMemory else false;
 }
 fn adequate(id: usize, image: *Image) bool {
@@ -758,6 +813,7 @@ fn applyPrepared(wanted: Prepared, revision: u64, surface: n.Ref) bool {
     if (s.cli.benchmark and s.heartbeat_last > 0) s.heartbeat_worst_ms = @max(s.heartbeat_worst_ms, (n.now() - s.heartbeat_last) * 1000);
     wanted.source.usedSurface();
     s.render_presented = wanted;
+    scheduleText();
     s.render_presented_revision = revision;
     s.held_advance.presented(n.CACurrentMediaTime());
     s.last_slide = n.now();
@@ -774,11 +830,17 @@ fn applyPrepared(wanted: Prepared, revision: u64, surface: n.Ref) bool {
 
 fn select(index: usize, reload: bool) void {
     if (s.closing or index >= s.entries.len) return;
-    const id = s.entries[index].id;
+    const selected = s.entries[index];
+    const id = selected.id;
+    const record = &s.cached[id];
+    const refresh_url = selected.downloaded and (reload or (s.options.network.refresh_on_revisit and s.desired != id and record.remote_selected));
+    record.remote_selected = selected.downloaded;
     if (s.desired) |previous| if (position(previous)) |p| {
         if (p != index) s.forward = index > p;
     };
     s.desired = id;
+    s.caption_editor.path = null;
+    s.text_work.cancel();
     s.selection_revision += 1;
     s.held_advance.selected();
     s.render_revision += 1;
@@ -791,9 +853,10 @@ fn select(index: usize, reload: bool) void {
     if (isMemoryFailure(s.cached[id].failure)) {
         s.cached[id].failed_version = 0;
     }
-    if (reload) {
-        s.cached[id].version += 1;
-        s.cached[id].failed_version = 0;
+    if (reload or refresh_url) {
+        record.version += 1;
+        record.failed_version = 0;
+        record.remote_refresh = record.remote_refresh or refresh_url;
     }
     if (s.cached[id].image != null and s.cached[id].image_version == s.cached[id].version) s.cache_hits += 1;
     status();
@@ -831,7 +894,13 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
     if (!cache.admitDecode(control.active_decodes, control.speculative_decodes, !prefetch) or (prefetch and !control.allow_prefetch)) return false;
     const available = control.decode_worker_budget - control.active_decode_workers;
     if (available == 0) return false;
-    const path = (entry(id) orelse return false).path;
+    const selected = entry(id) orelse return false;
+    const record = &s.cached[id];
+    if (record.remote_refresh) {
+        if (prefetch) return false;
+        for (s.jobs) |active| if (active.busy and active.id == id and active.refresh_url != null) return false;
+    }
+    const path = selected.path;
     // Extension is a scheduling hint only; content still selects the decoder.
     const ext = std.fs.path.extension(path);
     const is_parallel = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff") or std.ascii.eqlIgnoreCase(ext, ".jxl") or
@@ -847,6 +916,10 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
         }
     }
     job.* = .{ .owner = s, .busy = true, .prefetch = prefetch, .id = id, .version = s.cached[id].version, .path = path, .workers = workers, .limits = s.limits, .edge = edge };
+    if (record.remote_refresh) {
+        record.remote_refresh = false;
+        job.refresh_url = selected.savedPath();
+    }
     job.aggressive = intent == .aggressive;
     if (job.aggressive) {
         job.selection = s.selection_revision;
@@ -988,10 +1061,17 @@ fn decodeWorker(context: ?*anyopaque) callconv(.c) void {
     const job: *Job = @ptrCast(@alignCast(context.?));
     s = job.owner;
     const started = if (s.cli.benchmark) n.now() else 0;
-    const before = (Stamp.read(job.path) orelse Stamp{});
-    job.image = loadJob(job, before) catch |err| result: {
-        job.failure = err;
-        break :result null;
+    var before: Stamp = .{};
+    job.image = result: {
+        if (job.refresh_url) |remote_url| root.downloads.refresh(remote_url, job.path, s.options.network, &s.cancel) catch |err| {
+            job.failure = err;
+            break :result null;
+        };
+        before = Stamp.read(job.path) orelse Stamp{};
+        break :result loadJob(job, before) catch |err| failed: {
+            job.failure = err;
+            break :failed null;
+        };
     };
     if (job.image) |image| image.async_retirement = true;
     job.stamp = (Stamp.read(job.path) orelse Stamp{});
@@ -1157,9 +1237,9 @@ fn closePump() void {
         }
     }
     releasePump();
-    if (s.close_cursor != s.cached.len or s.release_count != 0 or s.releaser.busy or s.indexing or s.watch.busy or s.aux.busy or s.hook.busy or s.pressure_cancelling or rendersBusy() or s.preview_queued or s.automation_queued or s.status_queued or s.pending_sheets > 0) return;
+    if (s.close_cursor != s.cached.len or s.release_count != 0 or s.releaser.busy or s.indexing or s.watch.busy or s.aux.busy or s.hook.busy or s.pressure_cancelling or rendersBusy() or s.preview_queued or s.automation_queued or s.status_queued or s.pending_sheets > 0 or s.sheet_preview_queued.load(.acquire)) return;
     for (s.jobs) |job| if (job.busy) return;
-    if (s.filelist_saving or s.filelist_export.busy()) return;
+    if (s.filelist_saving or s.filelist_export.busy() or !s.text_work.idle() or s.caption_write.busy()) return;
     if (!s.filelist_saved and s.cli.filelist != null and !std.mem.eql(u8, s.cli.filelist.?, "-") and s.indexed and s.index_failure == null) {
         s.filelist_saving = true;
         n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, saveFilelistWorker);
@@ -1176,6 +1256,7 @@ fn closePump() void {
     std.debug.assert(s.presented_surface == null);
     s.layer.release();
     s.overlay.release();
+    if (s.hidden_cursor.value != null) s.hidden_cursor.release();
     s.view.release();
     s.window.release();
     s.delegate.release();
@@ -1195,6 +1276,7 @@ fn windowWillClose(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) vo
     useSession(self);
     if (s.closing) return;
     s.closing = true;
+    s.text_work.cancel();
     stopHeldAdvance();
     if (s.advance_display_link.value != null) {
         s.advance_display_link.msgSend(void, "invalidate", .{});
@@ -1237,6 +1319,15 @@ fn applySettings() void {
     s.settings = s.index_settings;
     s.settings_applied = true;
     s.cli.apply(&s.settings);
+    s.text = s.cli.text;
+    s.nearest = s.settings.nearest;
+    if (s.nearest) {
+        const sampler = string("nearest");
+        defer sampler.release();
+        s.layer.msgSend(void, "setMinificationFilter:", .{sampler});
+        s.layer.msgSend(void, "setMagnificationFilter:", .{sampler});
+    }
+    s.window.msgSend(void, "invalidateCursorRectsForView:", .{s.view});
     s.show_actions = s.cli.draw_actions;
     s.show_filename = s.cli.draw_filename;
     s.geometry.mode = s.settings.fit;
@@ -1272,9 +1363,17 @@ fn indexWorker(context: ?*anyopaque) callconv(.c) void {
         return;
     };
     s.catalog.probe = catalogInfo;
+    s.catalog.downloads = &root.downloads;
+    s.options.network = s.cli.network();
+    s.catalog.validate = catalogValidate;
     s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
         s.index_failure = err;
     };
+    if (s.index_failure == null and s.cli.sheet.mode != .viewer) {
+        buildContactSheet() catch |err| {
+            s.index_failure = err;
+        };
+    }
     for (s.catalog.entries[0..s.catalog.count]) |e| s.stamps[e.id] = (Stamp.read(e.path) orelse Stamp{});
     n.dispatch_async_f(n.dispatch_get_main_queue(), s, indexReady);
 }
@@ -1286,6 +1385,32 @@ fn initialReady(context: ?*anyopaque) callconv(.c) void {
     applySettings();
     s.entries = &s.initial;
     select(0, false);
+}
+fn openIndexedWindows() !void {
+    const origin = s;
+    defer s = origin;
+    var available: usize = 1;
+    for (control.active) |active| if (!active) {
+        available += 1;
+    };
+    if (origin.entries.len > available) return error.MultiwindowCapacityExceeded;
+    for (origin.entries[1..]) |image| {
+        for (&root.sessions, control.active, 0..) |*candidate, active, slot| {
+            if (active) continue;
+            initState(candidate, slot, origin.limits);
+            candidate.cli = origin.cli;
+            candidate.cli.filelist = null;
+            candidate.cli.multiwindow = false;
+            candidate.cli.default_directory = false;
+            candidate.input[0] = image.path;
+            candidate.input_count = 1;
+            s = candidate;
+            try launch();
+            control.active[slot] = true;
+            break;
+        }
+    }
+    origin.entries.len = 1;
 }
 fn indexReady(context: ?*anyopaque) callconv(.c) void {
     const previous = s;
@@ -1302,6 +1427,15 @@ fn indexReady(context: ?*anyopaque) callconv(.c) void {
     for (s.entries, 0..) |e, i| {
         s.positions[e.id] = i;
         if (s.cached[e.id].image != null) s.stamps[e.id] = s.cached[e.id].stamp;
+    }
+    if (s.cli.multiwindow and s.index_failure == null) {
+        openIndexedWindows() catch |err| {
+            n.output(2, @errorName(err));
+            n.output(2, "\n");
+            s.smoke_failed = true;
+            closeAll();
+            return;
+        };
     }
     if (s.desired == null and s.entries.len > 0) {
         const start_position = if (s.catalog.selected) |path| selected: {
@@ -1321,13 +1455,115 @@ fn append(buffer: []u8, used: *usize, comptime format: []const u8, args: anytype
     const text = std.fmt.bufPrint(buffer[used.*..], format, args) catch return;
     used.* += text.len;
 }
+fn textKey(id: usize) viewer_text.Key {
+    return .{ .index = id, .version = s.render_presented.?.version, .selection = s.selection_revision, .exif = s.text.exif_visible, .info = s.text.info_visible };
+}
+fn displayedText() ?*const viewer_text.Result {
+    const id = s.displayed orelse return null;
+    if (s.render_presented == null) return null;
+    if (s.text_result) |*result| if (std.meta.eql(result.key, textKey(id))) return result;
+    return null;
+}
+fn displaySnapshot(id: usize, image: *const Image) hooks.Snapshot {
+    return (hooks.Snapshot{
+        .path = s.displayed_path,
+        .mode = s.text.mode,
+        .width = image.source_width,
+        .height = image.source_height,
+        .bytes = @intCast(@max(0, s.stamps[id].bytes)),
+        .index = (position(id) orelse 0) + 1,
+        .count = s.entries.len,
+        .rotation = s.cached[id].rotation,
+        .playing = s.slideshow_running,
+        .pid = c.getpid(),
+        .image_format = if (displayedText()) |result| if (result.format) |*format| format.name() else "unknown" else "unknown",
+    }).withView(.{ .scale = s.geometry.scale, .pan_x = s.geometry.pan_x, .pan_y = -s.geometry.pan_y }, viewport());
+}
+fn scheduleText() void {
+    if (s.closing or !s.text.wanted() or s.render_presented == null) return;
+    const id = s.displayed orelse return;
+    if (id != s.desired or displayedText() != null) return;
+    if (!s.text_work.submit(.{ .key = textKey(id), .path = s.displayed_path, .snapshot = displaySnapshot(id, s.current orelse return), .options = s.text }, s.entries, null)) return;
+    n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, textWorker);
+}
+fn textWorker(context: ?*anyopaque) callconv(.c) void {
+    sessionContext(context);
+    _ = s.text_work.runPending(catalogInfo);
+    n.dispatch_async_f(n.dispatch_get_main_queue(), s, textReady);
+}
+fn textReady(context: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    sessionContext(context);
+    s.text_result = s.text_work.take();
+    if (!s.closing) {
+        scheduleText();
+        status();
+    }
+    pump();
+}
+
+fn editCaption() void {
+    if (s.closing or s.current == null or s.desired != s.displayed or s.text.caption_dir == null or s.caption_write.busy()) return;
+    const result = displayedText() orelse return;
+    s.caption_editor.begin(s.displayed_path, result.caption.bytes());
+    updateOverlay();
+}
+fn saveCaption() void {
+    if (!(s.caption_write.submit(&s.caption_editor, s.text.caption_dir.?) catch false)) {
+        notice("Could not save caption", .{});
+        return;
+    }
+    s.caption_editor.path = null;
+    n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, captionWorker);
+}
+fn captionWorker(context: ?*anyopaque) callconv(.c) void {
+    sessionContext(context);
+    _ = s.caption_write.runPending();
+    n.dispatch_async_f(n.dispatch_get_main_queue(), s, captionReady);
+}
+fn captionReady(context: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    sessionContext(context);
+    const saved = s.caption_write.take().?;
+    if (!s.closing) {
+        s.text_result = null;
+        s.text_work.cancel();
+        scheduleText();
+        notice("{s}", .{if (saved) "Caption saved" else "Could not save caption"});
+    }
+    pump();
+}
+fn captionKey(event: O, key: u16) void {
+    const modifiers = event.msgSend(usize, "modifierFlags", .{});
+    switch (key) {
+        27 => s.caption_editor.path = null,
+        13, 3 => if (modifiers & actions.control != 0) s.caption_editor.add("\n") else saveCaption(),
+        8, 127 => s.caption_editor.backspace(),
+        else => if (modifiers & (actions.control | actions.command) == 0) {
+            const chars = event.msgSend(O, "characters", .{});
+            const bytes = chars.msgSend([*c]const u8, "UTF8String", .{});
+            if (bytes != null) s.caption_editor.add(std.mem.span(bytes));
+        },
+    }
+    updateOverlay();
+}
+
 fn updateOverlay() void {
     if (s.overlay.value == null) return;
-    s.overlay.msgSend(void, "setHidden:", .{!s.show_info and !s.show_help and !s.show_actions and !s.show_filename});
-    if (!s.show_info and !s.show_help and !s.show_actions and !s.show_filename) return;
+    const extra = displayedText();
+    const visible = s.caption_editor.path != null or s.show_info or s.show_help or s.show_actions or s.show_filename or (if (extra) |result|
+        result.caption.len > 0 or result.camera.len > 0 or result.info.len > 0
+    else
+        false);
+    s.overlay.msgSend(void, "setHidden:", .{!visible});
+    if (!visible) return;
     var buffer: [24576]u8 = undefined;
     var used: usize = 0;
-    if (s.show_help) {
+    if (s.caption_editor.path != null) {
+        append(&buffer, &used, "Caption (Enter saves, Ctrl+Enter adds a line, Escape cancels)\n{s}\n", .{s.caption_editor.draft.bytes()});
+    } else if (s.show_help) {
         append(&buffer, &used, "Yekk shortcuts — ? or Escape to dismiss\n\n", .{});
         for (s.settings.bindings[0..s.settings.binding_count]) |binding| {
             var key: [1]u8 = .{@truncate(binding.key)};
@@ -1336,7 +1572,10 @@ fn updateOverlay() void {
         }
         append(&buffer, &used, "\nAll actions are available in the Actions menu.\nConfig: ~/.config/yekk/config\nSyntax: bind Cmd+e = external\n", .{});
     } else {
-        append(&buffer, &used, "{s}\n", .{s.displayed_path});
+        if (s.show_filename or s.show_info) append(&buffer, &used, "{s}\n", .{s.displayed_path});
+        if (extra) |result| for ([_][]const u8{ result.caption.bytes(), result.camera.bytes(), result.info.bytes() }) |line| {
+            if (line.len > 0) append(&buffer, &used, "{s}\n", .{line});
+        };
         if (s.show_info) if (s.current) |image| append(&buffer, &used, "{d} × {d} source · {d} × {d} decoded · {d}-bit\nZoom {d:.1}% · {d}/{d}\nResident cache {d:.1} MiB · {d} decodes · {d} hits\n{s} pressure · watch {any} · keep view {any}\n", .{ image.source_width, image.source_height, image.width, image.height, image.bits_per_component, s.geometry.scale * 100, (position(s.displayed.?) orelse 0) + 1, s.entries.len, @as(f64, @floatFromInt(s.resident_bytes)) / (1024 * 1024), s.decode_count, s.cache_hits, @tagName(s.pressure), s.settings.watch, s.settings.keep_view });
         if (s.show_actions) for (&s.settings.hooks, 0..) |*hook, number| {
             if (hook.len > 0) append(&buffer, &used, "{d}: {s}\n", .{ number, if (hook.title_len > 0) hook.title() else hook.body() });
@@ -1370,7 +1609,7 @@ fn tick(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
         s.heartbeat_last = now;
         s.heartbeat_count += 1;
     }
-    if (s.slideshow_running and now - s.last_slide >= s.settings.interval and s.desired != null) {
+    if (s.caption_editor.path == null and s.slideshow_running and now - s.last_slide >= s.settings.interval and s.desired != null) {
         const id = s.desired.?;
         const failed = s.cached[id].failed_version == s.cached[id].version;
         if (failed) s.slide_failures += 1;
@@ -1390,15 +1629,25 @@ fn tick(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
         s.last_watch = now;
         s.watch.count = 0;
         if (s.desired) |id| if (entry(id)) |e| {
-            s.watch.items[0] = .{ .entry = e, .stamp = .{} };
-            s.watch.count = 1;
+            if (e.downloaded) {
+                if (inflight(id) == null) {
+                    const record = &s.cached[id];
+                    record.version += 1;
+                    record.failed_version = 0;
+                    record.remote_refresh = true;
+                    pump();
+                }
+            } else {
+                s.watch.items[0] = .{ .entry = e, .stamp = .{} };
+                s.watch.count = 1;
+            }
         };
         var tried: usize = 0;
         while (s.watch.count < s.watch.items.len and tried < s.entries.len) : (tried += 1) {
             if (s.entries.len == 0) break;
             const e = s.entries[s.watch.cursor % s.entries.len];
             s.watch.cursor += 1;
-            if (s.desired == e.id) continue;
+            if (s.desired == e.id or e.downloaded) continue;
             if (s.cached[e.id].image != null) {
                 s.watch.items[s.watch.count] = .{ .entry = e, .stamp = .{} };
                 s.watch.count += 1;
@@ -1445,18 +1694,8 @@ fn runHook(number: usize) void {
     const id = s.displayed.?;
     const image = s.current.?;
     const path = (entry(id) orelse return).path;
-    const vp = viewport();
-    s.hook.snapshot = (hooks.Snapshot{
-        .path = path,
-        .width = image.source_width,
-        .height = image.source_height,
-        .bytes = @intCast(@max(0, s.stamps[id].bytes)),
-        .index = (position(id) orelse 0) + 1,
-        .count = s.entries.len,
-        .rotation = s.cached[id].rotation,
-        .playing = s.slideshow_running,
-        .pid = c.getpid(),
-    }).withView(.{ .scale = s.geometry.scale, .pan_x = s.geometry.pan_x, .pan_y = -s.geometry.pan_y }, vp);
+    s.hook.snapshot = displaySnapshot(id, image);
+    s.hook.thumbnail = false;
     s.hook.template = command.*;
     s.hook.manifest_count = 0;
     if (hooks.needsManifest(command.body())) {
@@ -1473,10 +1712,18 @@ fn runHook(number: usize) void {
     n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, hookWorker);
 }
 fn executeHook() !commands.Result {
+    const execution = @import("hook_execution.zig");
     var snapshot = s.hook.snapshot;
-    var meta = if (hooks.usesSpecifier(s.hook.template.body(), 't')) decoder.metadata(s.hook.path) catch null else null;
-    if (meta) |*value| snapshot.image_format = value.format[0..value.format_len];
-    return @import("hook_execution.zig").run(&s.hook.command, s.hook.template, snapshot, .{ .paths = s.hook_paths[0..s.hook.manifest_count] }, &s.cancel);
+    var meta = if (s.hook.thumbnail or hooks.usesSpecifier(s.hook.template.body(), 't')) decoder.metadataWithCancel(s.hook.path, &s.cancel) catch null else null;
+    if (meta) |*value| {
+        snapshot.image_format = value.format[0..value.format_len];
+        if (s.hook.thumbnail) {
+            snapshot.width = value.width;
+            snapshot.height = value.height;
+        }
+    }
+    const paths: execution.Paths = if (s.hook.thumbnail) .{ .entries = .{ .entries = s.catalog.entries[0..s.gallery.original_count], .first = s.gallery.original_first } } else .{ .paths = s.hook_paths[0..s.hook.manifest_count] };
+    return execution.run(&s.hook.command, s.hook.template, snapshot, paths, &s.cancel);
 }
 
 fn hookWorker(context: ?*anyopaque) callconv(.c) void {
@@ -1497,9 +1744,9 @@ fn hookDone(context: ?*anyopaque) callconv(.c) void {
         s.notice_len = 0;
         const job = &s.hook;
         const still_selected = s.desired == job.id and s.selection_revision == job.selection;
-        if (!job.exists) {
+        if (!job.thumbnail and !job.exists) {
             removeEntry(job.id);
-        } else if (job.result.success() and job.failure == null and still_selected) {
+        } else if (!job.thumbnail and job.result.success() and job.failure == null and still_selected) {
             if (job.reload) {
                 if (position(job.id)) |p| select(p, true);
             } else navigate(1, false);
@@ -1520,8 +1767,39 @@ fn auxiliaryForId(kind: Auxiliary, id: usize) void {
         return;
     }
     const e = entry(id) orelse return;
-    s.aux = .{ .busy = true, .kind = kind, .path = e.path, .id = id };
+    const record = s.cached[id];
+    s.aux = .{ .busy = true, .kind = kind, .path = e.path, .id = id, .rotation = record.rotation, .mirror = @as(u2, @intFromBool(record.mirror_x)) | (@as(u2, @intFromBool(record.mirror_y)) << 1), .stamp = if (kind == .save_image) record.stamp else null };
     n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, auxiliaryWorker);
+}
+fn writeImage(image: n.Ref, path: [:0]const u8, format: image_output.Format) !void {
+    const target = n.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0) orelse return error.ImageOutputFailed;
+    defer n.CFRelease(target);
+    const uti = string(switch (format) {
+        .png => "public.png",
+        .jpeg => "public.jpeg",
+        .tiff => "public.tiff",
+    });
+    defer uti.release();
+    const destination = n.CGImageDestinationCreateWithURL(target, @ptrCast(uti.value.?), 1, null) orelse return error.ImageOutputFailed;
+    defer n.CFRelease(destination);
+    n.CGImageDestinationAddImage(destination, image, null);
+    if (n.CGImageDestinationFinalize(destination) == 0) return error.ImageOutputFailed;
+}
+fn writeTransformed(job: *const Aux, path: [:0]const u8, format: image_output.Format) !void {
+    if (job.stamp) |stamp| if (!std.meta.eql(@as(?Stamp, stamp), Stamp.read(job.path))) return error.SourceChanged;
+    const source_image = try decoder.loadWithLimits(job.path, 0, memory.allocator(), .{ .cancel = &s.cancel });
+    defer source_image.destroy();
+    if (job.stamp) |stamp| if (!std.meta.eql(@as(?Stamp, stamp), Stamp.read(job.path))) return error.SourceChanged;
+    if (job.rotation == 0 and job.mirror == 0) return writeImage(source_image.native, path, format);
+    const input_image = cls("CIImage").msgSend(O, "alloc", .{}).msgSend(O, "initWithCGImage:", .{source_image.native});
+    defer input_image.release();
+    var image = input_image.msgSend(O, "imageByApplyingOrientation:", .{([_]c_int{ 1, 6, 3, 8 })[job.rotation]});
+    if (job.mirror & 1 != 0) image = image.msgSend(O, "imageByApplyingOrientation:", .{@as(c_int, 2)});
+    if (job.mirror & 2 != 0) image = image.msgSend(O, "imageByApplyingOrientation:", .{@as(c_int, 4)});
+    const ci_context = cls("CIContext").msgSend(O, "contextWithOptions:", .{nil});
+    const transformed = ci_context.msgSend(?n.Ref, "createCGImage:fromRect:", .{ image, image.msgSend(n.Rect, "extent", .{}) }) orelse return error.RenderFailed;
+    defer n.CFRelease(transformed);
+    try writeImage(transformed, path, format);
 }
 fn auxiliaryWorker(context: ?*anyopaque) callconv(.c) void {
     sessionContext(context);
@@ -1542,18 +1820,26 @@ fn auxiliaryWorker(context: ?*anyopaque) callconv(.c) void {
         .snapshot => {
             const image = s.aux.native_image.?;
             defer n.CFRelease(image);
-            const path = s.aux.path;
-            const file = n.CFURLCreateFromFileSystemRepresentation(null, path.ptr, @intCast(path.len), 0);
-            if (file) |target| {
-                defer n.CFRelease(target);
-                const png = string("public.png");
-                defer png.release();
-                if (n.CGImageDestinationCreateWithURL(target, @ptrCast(png.value.?), 1, null)) |destination| {
-                    defer n.CFRelease(destination);
-                    n.CGImageDestinationAddImage(destination, image, null);
-                    s.aux.success = n.CGImageDestinationFinalize(destination) != 0;
-                }
-            }
+            writeImage(image, s.aux.path, .png) catch {
+                n.dispatch_async_f(n.dispatch_get_main_queue(), s, auxiliaryDone);
+                return;
+            };
+            s.aux.success = true;
+        },
+        .edit_image => {
+            image_output.editJpeg(s.aux.path, s.aux.stamp, s.aux.edit, memory.allocator()) catch |err| {
+                s.aux.failure = err;
+                n.dispatch_async_f(n.dispatch_get_main_queue(), s, auxiliaryDone);
+                return;
+            };
+            s.aux.success = true;
+        },
+        .save_image => {
+            image_output.saveCopy(control.output_dir, s.aux.path, &s.aux, writeTransformed) catch {
+                n.dispatch_async_f(n.dispatch_get_main_queue(), s, auxiliaryDone);
+                return;
+            };
+            s.aux.success = true;
         },
     }
     n.dispatch_async_f(n.dispatch_get_main_queue(), s, auxiliaryDone);
@@ -1565,19 +1851,24 @@ fn auxiliaryDone(context: ?*anyopaque) callconv(.c) void {
     s.aux.busy = false;
     if (!s.closing) {
         if (s.aux.success and s.aux.kind == .trash and s.aux.id != null) removeEntry(s.aux.id.?);
-        notice("{s}", .{if (s.aux.success) "Operation complete" else "Operation failed"});
+        if (s.aux.success and s.aux.kind == .edit_image) {
+            const id = s.aux.id.?;
+            s.cached[id].version += 1;
+            s.cached[id].failed_version = 0;
+        }
+        if (s.aux.failure) |err| notice("{s}", .{@errorName(err)}) else notice("{s}", .{if (s.aux.success) "Operation complete" else "Operation failed"});
     }
     pump();
 }
 fn launchSelection(paths: O) void {
     const previous = s;
     defer s = previous;
-    openSelection(paths) catch |err| {
+    openSelection(paths, true) catch |err| {
         s = previous;
         notice("Cannot open session: {s}", .{@errorName(err)});
     };
 }
-fn openSelection(paths: O) !void {
+fn openSelection(paths: O, browse: bool) !void {
     if (!paths.msgSend(bool, "isKindOfClass:", .{cls("NSArray")})) return error.InvalidSelection;
     const count = paths.msgSend(usize, "count", .{});
     if (count == 0) return;
@@ -1595,6 +1886,12 @@ fn openSelection(paths: O) !void {
             if (!active) {
                 initState(candidate, slot, s.limits);
                 candidate.cli.smoke = s.cli.smoke_windows;
+                candidate.cli.text = s.cli.text;
+                candidate.cli.text.mode = if (browse) .slideshow else .thumbview;
+                if (!browse) {
+                    candidate.cli.text.title = s.cli.text.thumb_title;
+                    candidate.cli.fullscreen = s.cli.fullscreen;
+                }
                 control.active[slot] = true;
                 target = candidate;
                 created = true;
@@ -1606,13 +1903,13 @@ fn openSelection(paths: O) !void {
     s.cli.default_directory = false;
     s.native_inputs = paths.msgSend(O, "copy", .{});
     s.input_count = count;
-    s.options.browse = count == 1;
+    s.options.browse = browse and count == 1;
     if (created) try launch() else startIndex();
 }
 fn startIndex() void {
     s.indexing = true;
     s.catalog.cancel = &s.cancel;
-    s.catalog.on_initial = if (s.options.sort != null or s.options.reverse or s.options.shuffle or s.options.start_at != null or s.cli.filelist != null) null else initialIndexed;
+    s.catalog.on_initial = if (s.cli.multiwindow or s.cli.sheet.mode != .viewer or s.options.sort != null or s.options.reverse or s.options.shuffle or s.options.start_at != null or s.cli.filelist != null) null else initialIndexed;
     n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, indexWorker);
 }
 
@@ -1707,6 +2004,14 @@ fn background() void {
     // Native pattern colors render the transparency backdrop without an app
     // redraw loop. A tiny native image is created only when toggled.
     if (!s.settings.checker) {
+        if (s.settings.background_color) |rgb| {
+            const red = @as(f64, @floatFromInt(rgb[0])) / 255;
+            const green = @as(f64, @floatFromInt(rgb[1])) / 255;
+            const blue = @as(f64, @floatFromInt(rgb[2])) / 255;
+            const color = cls("NSColor").msgSend(O, "colorWithSRGBRed:green:blue:alpha:", .{ red, green, blue, @as(f64, 1) });
+            s.window.msgSend(void, "setBackgroundColor:", .{color});
+            return;
+        }
         s.window.msgSend(void, "setBackgroundColor:", .{cls("NSColor").msgSend(O, "colorWithWhite:alpha:", .{ @as(f64, 0.08), @as(f64, 1) })});
         return;
     }
@@ -1734,6 +2039,13 @@ fn perform(action: Action) void {
         ensureDetail();
         return;
     }
+    if (s.settings.edit) if (view_actions.editOrientation(action)) |operation| {
+        if (s.aux.busy or s.current == null or s.displayed != s.desired) return;
+        const id = s.displayed.?;
+        s.aux = .{ .busy = true, .kind = .edit_image, .path = s.displayed_path, .id = id, .edit = operation, .stamp = s.cached[id].stamp };
+        n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, auxiliaryWorker);
+        return;
+    };
     switch (action) {
         .menu => showMenu(s.app.msgSend(O, "currentEvent", .{})),
         .render => {
@@ -1788,8 +2100,23 @@ fn perform(action: Action) void {
             r.mirror_y = mirror & 2 != 0;
             layout();
         },
+        .toggle_exif => {
+            s.text.exif_visible = !s.text.exif_visible;
+            s.text_work.cancel();
+            scheduleText();
+            updateOverlay();
+        },
+        .toggle_caption => editCaption(),
+        .toggle_pointer => {
+            s.settings.hide_pointer = !s.settings.hide_pointer;
+            s.window.msgSend(void, "invalidateCursorRectsForView:", .{s.view});
+        },
         .info => {
-            s.show_info = !s.show_info;
+            if (s.text.info != null) {
+                s.text.info_visible = !s.text.info_visible;
+                s.text_work.cancel();
+                scheduleText();
+            } else s.show_info = !s.show_info;
             s.show_help = false;
             updateOverlay();
         },
@@ -1837,11 +2164,17 @@ fn perform(action: Action) void {
         },
         .trash => confirmTrash(),
         .save_filelist => exportFilelist(),
+        .save_image => if (s.current != null) auxiliary(.save_image),
         .resize_window => if (s.current) |image| {
             const size = sourceSize(image);
             const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
             const screen = s.window.msgSend(O, "screen", .{}).msgSend(n.Rect, "visibleFrame", .{});
-            s.window.msgSend(void, "setContentSize:", .{n.Size{ .width = @min(screen.size.width, size.width / backing), .height = @min(screen.size.height - 40, size.height / backing) }});
+            const width = size.width / backing;
+            const height = size.height / backing;
+            s.window.msgSend(void, "setContentSize:", .{n.Size{
+                .width = if (s.settings.no_screen_clip) width else @min(screen.size.width, width),
+                .height = if (s.settings.no_screen_clip) height else @min(screen.size.height - 40, height),
+            }});
         },
         else => unreachable, // View actions returned through the shared handler above.
     }
@@ -1931,6 +2264,7 @@ fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
         chars.msgSend(u16, "characterAtIndex:", .{@as(usize, 0)})
     else
         return;
+    if (s.caption_editor.path != null) return captionKey(event, key);
     const repeated = event.msgSend(bool, "isARepeat", .{});
     const action = s.settings.lookup(key, event.msgSend(usize, "modifierFlags", .{}));
     if (action == .next or action == .previous) {
@@ -1945,7 +2279,7 @@ fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
         }
         return;
     }
-    if (repeated and action == .save_filelist) return;
+    if (repeated and (action == .save_filelist or action == .save_image)) return;
     if (!repeated) stopHeldAdvance();
     if (key == 0x1B) {
         if (s.show_help or s.show_info) {
@@ -2035,7 +2369,14 @@ fn mouseUp(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     s.drag_button = null;
     s.dragging = null;
     if (legacy_click) {
-        if (zoom) perform(.actual) else navigate(1, false);
+        if (!zoom and openThumbnail(raw)) return;
+        if (zoom) {
+            perform(.actual);
+        } else {
+            const bounds = s.view.msgSend(n.Rect, "bounds", .{});
+            const left = s.settings.tap_zones and s.mouse_origin.x < bounds.size.width / 2;
+            navigate(if (left) -1 else 1, false);
+        }
     }
 }
 fn mouseDragged(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
@@ -2061,7 +2402,7 @@ fn mouseDragged(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) voi
     if (s.middle_zoom) ensureDetail();
 }
 fn showMenu(event: O) void {
-    if (event.value == null) return;
+    if (event.value == null or !s.settings.menus) return;
     menus();
     const main = s.app.msgSend(O, "mainMenu", .{});
     const name = string("Actions");
@@ -2096,6 +2437,45 @@ fn finderOpen(_: objc.c.id, _: objc.c.SEL, _: objc.c.id, paths_raw: objc.c.id) c
     if (sessions.route(control.cli_inputs, control.finished_launching, false, 0) != .ignore_cli_replay) launchSelection(.{ .value = paths_raw });
     control.app.msgSend(void, "replyToOpenOrPrint:", .{@as(usize, 0)});
 }
+fn frontSession() ?*State {
+    for (&root.sessions, control.active) |*candidate, active| {
+        if (active and !candidate.closing and candidate.window.msgSend(bool, "isKeyWindow", .{})) return candidate;
+    }
+    for (&root.sessions, control.active) |*candidate, active| if (active and !candidate.closing) return candidate;
+    return null;
+}
+fn terminalInput(_: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    s = frontSession() orelse return;
+    for (0..16) |_| {
+        const key = control.terminal.next() orelse break;
+        if (s.closing) break;
+        if (s.settings.lookup(key.value, key.modifiers)) |action| perform(action);
+    }
+}
+fn processNext(_: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    s = frontSession() orelse return;
+    perform(if (s.entries.len == 1) .reload else .next);
+}
+fn processPrevious(_: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    s = frontSession() orelse return;
+    perform(if (s.entries.len == 1) .reload else .previous);
+}
+fn signalHandler(_: c_int) callconv(.c) void {}
+fn processQuit(_: ?*anyopaque) callconv(.c) void {
+    closeAll();
+}
+fn processSource(kind: *anyopaque, handle: usize, handler: *const fn (?*anyopaque) callconv(.c) void) ?*anyopaque {
+    const event = n.dispatch_source_create(kind, handle, 0, n.dispatch_get_main_queue()) orelse return null;
+    n.dispatch_source_set_event_handler_f(event, handler);
+    n.dispatch_resume(event);
+    return event;
+}
 fn didFinishLaunching(_: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
     control.finished_launching = true;
     const previous = s;
@@ -2128,6 +2508,19 @@ fn becameKey(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
 fn addMethod(class: objc.Class, comptime name: [:0]const u8, implementation: anytype) void {
     if (!class.addMethod(name, implementation)) @panic("cannot register native callback");
 }
+fn resetCursorRects(self: objc.c.id, _: objc.c.SEL) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    useSession(self);
+    if (!s.settings.hide_pointer) return;
+    if (s.hidden_cursor.value == null) {
+        const transparent = cls("NSImage").msgSend(O, "alloc", .{}).msgSend(O, "initWithSize:", .{n.Size{ .width = 1, .height = 1 }});
+        defer transparent.release();
+        s.hidden_cursor = cls("NSCursor").msgSend(O, "alloc", .{}).msgSend(O, "initWithImage:hotSpot:", .{ transparent, n.Point{ .x = 0, .y = 0 } });
+    }
+    const bounds = s.view.msgSend(n.Rect, "bounds", .{});
+    s.view.msgSend(void, "addCursorRect:cursor:", .{ bounds, s.hidden_cursor });
+}
 fn menus() void {
     const menu = cls("NSMenu").msgSend(O, "new", .{});
     defer menu.release();
@@ -2138,6 +2531,10 @@ fn menus() void {
     addMenuAction(app_menu, .quit, "Quit Yekk");
     app_item.msgSend(void, "setSubmenu:", .{app_menu});
     menu.msgSend(void, "addItem:", .{app_item});
+    if (s.cli.no_menus or !s.settings.menus) {
+        s.app.msgSend(void, "setMainMenu:", .{menu});
+        return;
+    }
     const actions_item = cls("NSMenuItem").msgSend(O, "new", .{});
     defer actions_item.release();
     setText(actions_item, "setTitle:", "Actions");
@@ -2177,6 +2574,15 @@ fn addMenuAction(menu: O, action: Action, label: []const u8) void {
     item.msgSend(void, "setTarget:", .{s.delegate});
     item.msgSend(void, "setTag:", .{@as(isize, @backingInt(action))});
     item.msgSend(void, "setKeyEquivalentModifierMask:", .{modifiers});
+    if (s.text.menu_font) |font| {
+        const font_key = string("NSFont");
+        defer font_key.release();
+        const attributes = cls("NSMutableDictionary").msgSend(O, "dictionary", .{});
+        attributes.msgSend(void, "setObject:forKey:", .{ textFont(font, 11), font_key });
+        const label_value = cls("NSAttributedString").msgSend(O, "alloc", .{}).msgSend(O, "initWithString:attributes:", .{ title_text, attributes });
+        defer label_value.release();
+        item.msgSend(void, "setAttributedTitle:", .{label_value});
+    }
 }
 fn nativeBool(value: anytype) bool {
     return switch (@TypeOf(value)) {
@@ -2204,6 +2610,7 @@ fn initializeNative() !void {
     control.session_class = delegate_class;
     const view_class = objc.allocateClassPair(cls("NSView"), "YekkView") orelse return error.NativeInitialization;
     addMethod(view_class, "acceptsFirstResponder", accepts);
+    addMethod(view_class, "resetCursorRects", resetCursorRects);
     addMethod(view_class, "keyDown:", keyDown);
     addMethod(view_class, "keyUp:", keyUp);
     addMethod(view_class, "scrollWheel:", scroll);
@@ -2274,7 +2681,7 @@ fn launch() !void {
     s.overlay.msgSend(void, "setDrawsBackground:", .{true});
     s.overlay.msgSend(void, "setBackgroundColor:", .{cls("NSColor").msgSend(O, "colorWithWhite:alpha:", .{ @as(f64, 0.05), @as(f64, 0.85) })});
     s.overlay.msgSend(void, "setTextColor:", .{cls("NSColor").msgSend(O, "whiteColor", .{})});
-    s.overlay.msgSend(void, "setFont:", .{cls("NSFont").msgSend(O, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 11), @as(f64, 0) })});
+    s.overlay.msgSend(void, "setFont:", .{textFont(s.cli.text.font, 11)});
     s.overlay.msgSend(void, "setHidden:", .{true});
     s.view.msgSend(void, "addSubview:", .{s.overlay});
     const drag_type = string("NSFilenamesPboardType");
@@ -2290,7 +2697,7 @@ fn launch() !void {
     n.dispatch_resume(s.pressure_source.?);
     s.window.msgSend(void, "makeKeyAndOrderFront:", .{nil});
     s.app.msgSend(void, "activateIgnoringOtherApps:", .{true});
-    if (s.cli.fullscreen) perform(.fullscreen);
+    if (s.cli.fullscreen and s.cli.sheet.mode != .thumbnails) perform(.fullscreen);
     if ((s.input_count > 0 or s.cli.filelist != null) and !s.cli.default_directory) startIndex();
 }
 fn automation() void {
@@ -2299,7 +2706,7 @@ fn automation() void {
     n.dispatch_async_f(n.dispatch_get_main_queue(), s, automated);
 }
 fn automationReady() bool {
-    if (control.memory_recovering or (rendersBusy() and !s.cli.benchmark_pan) or (s.render_wanted != null and s.render_presented_revision != s.render_revision and s.render_failed_revision != s.render_revision) or s.indexing or !s.indexed or s.closing or s.releaser.busy or s.release_count > 0 or s.aux.busy or s.hook.busy or s.filelist_export.busy() or s.pending_sheets > 0) return false;
+    if (control.memory_recovering or (rendersBusy() and !s.cli.benchmark_pan) or (s.render_wanted != null and s.render_presented_revision != s.render_revision and s.render_failed_revision != s.render_revision) or s.indexing or !s.indexed or s.closing or s.releaser.busy or s.release_count > 0 or s.aux.busy or s.hook.busy or s.filelist_export.busy() or !s.text_work.idle() or s.pending_sheets > 0) return false;
     if (!s.cli.benchmark_pan and control.speculative_renders != 0) return false;
     for (s.jobs) |job| if (job.busy and !(s.cli.benchmark_pan and job.prefetch and s.current != null and s.displayed == s.desired)) return false;
     if (s.desired) |id| {
@@ -2822,6 +3229,7 @@ fn parseOption(item: options.Item) !void {
 }
 fn exportFilelist() void {
     if (s.closing) return;
+    if (s.gallery.layout != null) return notice("File list export is unavailable in contact sheet modes", .{});
     if (!s.indexed or s.index_failure != null or s.entries.len == 0) {
         notice("No image list to save", .{});
         return;
@@ -2846,8 +3254,189 @@ fn exportFilelistDone(context: ?*anyopaque) callconv(.c) void {
     pump();
 }
 
+const SheetBackend = struct {
+    fn bitmap(canvas: contact_sheet.Canvas) !n.Ref {
+        const color = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse return error.RenderFailed;
+        defer n.CFRelease(color);
+        return n.CGBitmapContextCreate(canvas.pixels.ptr, canvas.width, canvas.height, 8, @as(usize, canvas.width) * 4, color, 0x4001) orelse error.RenderFailed;
+    }
+    pub fn tile(canvas: contact_sheet.Canvas, path: [:0]const u8, cell: contact_sheet.Rect, sheet_options: contact_sheet.Options) !catalog.Dimensions {
+        const pool = objc.AutoreleasePool.init();
+        defer pool.deinit();
+        const pixels = try decoder.loadWithLimits(path, @max(cell.width, cell.height), memory.allocator(), .{ .cancel = &s.cancel });
+        defer pixels.destroy();
+        const out = contact_sheet.fit(cell, pixels.source_width, pixels.source_height, sheet_options);
+        const context = try bitmap(canvas);
+        defer n.CFRelease(context);
+        n.CGContextSetAlpha(context, @as(f64, @floatFromInt(sheet_options.opacity)) / 255);
+        n.CGContextDrawImage(context, n.rect(@floatFromInt(out.x), @floatFromInt(canvas.height - out.y - out.height), @floatFromInt(out.width), @floatFromInt(out.height)), pixels.native);
+        return .{ .width = pixels.source_width, .height = pixels.source_height };
+    }
+    pub fn label(canvas: contact_sheet.Canvas, text: [:0]const u8, area: contact_sheet.Rect, font: ?Font) !void {
+        const pool = objc.AutoreleasePool.init();
+        defer pool.deinit();
+        const context = try bitmap(canvas);
+        defer n.CFRelease(context);
+        const native = cls("NSGraphicsContext");
+        const graphics = native.msgSend(O, "graphicsContextWithCGContext:flipped:", .{ context, false });
+        native.msgSend(void, "saveGraphicsState", .{});
+        defer native.msgSend(void, "restoreGraphicsState", .{});
+        native.msgSend(void, "setCurrentContext:", .{graphics});
+        const font_key = string("NSFont");
+        defer font_key.release();
+        const color_key = string("NSColor");
+        defer color_key.release();
+        const attrs = cls("NSMutableDictionary").msgSend(O, "dictionary", .{});
+        attrs.msgSend(void, "setObject:forKey:", .{ textFont(font, 11), font_key });
+        attrs.msgSend(void, "setObject:forKey:", .{ cls("NSColor").msgSend(O, "whiteColor", .{}), color_key });
+        const label_string = string(text);
+        defer label_string.release();
+        label_string.msgSend(void, "drawInRect:withAttributes:", .{ n.rect(@floatFromInt(area.x), @floatFromInt(canvas.height - area.y - area.height), @floatFromInt(area.width), @floatFromInt(area.height)), attrs });
+    }
+    pub fn progress(state: *State, canvas: contact_sheet.Canvas) void {
+        if (state.sheet_preview_queued.swap(true, .acq_rel)) return;
+        const boundary = contact_sheet.fit(.{ .width = 1024, .height = 768 }, canvas.width, canvas.height, .{});
+        state.sheet_preview = preview(canvas, boundary.width, boundary.height);
+        n.dispatch_async_f(n.dispatch_get_main_queue(), state, sheetProgress);
+    }
+    fn preview(canvas: contact_sheet.Canvas, width: u32, height: u32) ?n.Ref {
+        const color = n.CGColorSpaceCreateWithName(n.kCGColorSpaceSRGB) orelse return null;
+        defer n.CFRelease(color);
+        const row = @as(usize, width) * 4;
+        const context = n.CGBitmapContextCreate(null, width, height, 8, row, color, 0x4001) orelse return null;
+        defer n.CFRelease(context);
+        const pixels = n.CGBitmapContextGetData(context) orelse return null;
+        canvas.preview(.{ .pixels = pixels[0 .. row * height], .width = width, .height = height });
+        return n.CGBitmapContextCreateImage(context);
+    }
+    pub fn encode(canvas: contact_sheet.Canvas, path: [:0]const u8, format: image_output.Format) !void {
+        const context = try bitmap(canvas);
+        defer n.CFRelease(context);
+        const sheet_image = n.CGBitmapContextCreateImage(context) orelse return error.RenderFailed;
+        defer n.CFRelease(sheet_image);
+        try writeImage(sheet_image, path, format);
+    }
+};
+fn sheetProgress(context: ?*anyopaque) callconv(.c) void {
+    const previous = s;
+    defer s = previous;
+    sessionContext(context);
+    defer {
+        s.sheet_preview_queued.store(false, .release);
+        if (s.closing) closePump();
+    }
+    if (s.sheet_preview) |image| {
+        s.sheet_preview = null;
+        defer n.CFRelease(image);
+        if (!s.closing and s.indexing and s.current == null) {
+            const bounds = s.view.msgSend(n.Rect, "bounds", .{});
+            const scale_factor = s.window.msgSend(f64, "backingScaleFactor", .{});
+            const width: f64 = @floatFromInt(n.CGImageGetWidth(image));
+            const height: f64 = @floatFromInt(n.CGImageGetHeight(image));
+            const scale = @min(1 / scale_factor, bounds.size.width / width, bounds.size.height / height);
+            const w = width * scale;
+            const h = height * scale;
+            const transaction = cls("CATransaction");
+            transaction.msgSend(void, "begin", .{});
+            transaction.msgSend(void, "setDisableActions:", .{true});
+            s.layer.msgSend(void, "setFrame:", .{n.rect((bounds.size.width - w) / 2, (bounds.size.height - h) / 2, w, h)});
+            s.layer.msgSend(void, "setContents:", .{@as(O, .{ .value = @ptrCast(@alignCast(@constCast(image))) })});
+            transaction.msgSend(void, "commit", .{});
+        }
+    }
+    status();
+}
+fn buildContactSheet() !void {
+    var effective = s.cli.sheet;
+    effective.font = s.cli.text.font;
+    effective.title = s.cli.text.title;
+    if (effective.mode == .viewer) effective.mode = .montage;
+    const temporary = if (effective.destination == null) try root.downloads.workDir() else ".";
+    try s.gallery.build(&s.catalog, effective, temporary, s, SheetBackend);
+}
+fn setWallpaper() !void {
+    var directory_buffer: [4096]u8 = undefined;
+    const directory = try desktop_wallpaper.macDirectory(&directory_buffer);
+    const screens = cls("NSScreen").msgSend(O, "screens", .{});
+    const screen_count = screens.msgSend(usize, "count", .{});
+    if (screen_count == 0) return error.NoDisplay;
+    const first = s.cli.xinerama_index orelse 0;
+    if (first >= screen_count) return error.NoDisplay;
+    const end = if (s.cli.xinerama_index != null or s.cli.primary_only) first + 1 else screen_count;
+    const workspace = cls("NSWorkspace").msgSend(O, "sharedWorkspace", .{});
+    for (first..end) |index| {
+        const screen = screens.msgSend(O, "objectAtIndex:", .{index});
+        const frame = screen.msgSend(n.Rect, "frame", .{});
+        const scale = screen.msgSend(f64, "backingScaleFactor", .{});
+        if (!std.math.isFinite(frame.size.width * scale) or !std.math.isFinite(frame.size.height * scale) or frame.size.width * scale < 1 or frame.size.height * scale < 1 or frame.size.width * scale > 65535 or frame.size.height * scale > 65535) return error.InvalidDisplay;
+        const extent: desktop_wallpaper.Size = .{ .width = @intFromFloat(frame.size.width * scale), .height = @intFromFloat(frame.size.height * scale) };
+        const entry_index = @min(index - first, s.catalog.count - 1);
+        const edge = if (s.cli.wallpaper == .tile or s.cli.wallpaper == .center) 0 else @max(extent.width, extent.height);
+        const image = try decoder.loadWithLimits(s.catalog.entries[entry_index].path, edge, memory.allocator(), .{});
+        defer image.destroy();
+        const allocation_bytes = try std.math.mul(usize, @as(usize, extent.width) * extent.height, 4);
+        const data = try memory.allocator().alloc(u8, allocation_bytes);
+        defer memory.allocator().free(data);
+        const canvas: contact_sheet.Canvas = .{ .pixels = data, .width = extent.width, .height = extent.height };
+        @memset(data, 0);
+        const background_rgb = if (s.cli.background) |color| if (color == .color) color.color else [3]u8{ 0, 0, 0 } else [3]u8{ 0, 0, 0 };
+        for (0..allocation_bytes / 4) |px| data[px * 4 ..][0..4].* = background_rgb ++ [_]u8{255};
+        const context = try SheetBackend.bitmap(canvas);
+        defer n.CFRelease(context);
+        const mode = s.cli.wallpaper.?;
+        const box = desktop_wallpaper.placement(mode, extent, .{ .width = image.source_width, .height = image.source_height }, s.cli.geometry);
+        const rows: usize = if (mode == .tile) @intFromFloat(@ceil(@as(f64, @floatFromInt(extent.height)) / box.height)) else 1;
+        const columns: usize = if (mode == .tile) @intFromFloat(@ceil(@as(f64, @floatFromInt(extent.width)) / box.width)) else 1;
+        for (0..rows) |row| for (0..columns) |col| {
+            const x = box.x + @as(f64, @floatFromInt(col)) * box.width;
+            const y = box.y + @as(f64, @floatFromInt(row)) * box.height;
+            n.CGContextDrawImage(context, n.rect(x, @as(f64, @floatFromInt(extent.height)) - y - box.height, box.width, box.height), image.native);
+        };
+        const wallpaper_image = n.CGBitmapContextCreateImage(context) orelse return error.RenderFailed;
+        defer n.CFRelease(wallpaper_image);
+        var staged: image_output.Temporary = .{};
+        defer staged.deinit();
+        try staged.create(directory, .png);
+        try writeImage(wallpaper_image, staged.path(), .png);
+        var path_buffer: [4096]u8 = undefined;
+        const destination = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/wallpaper-{d}.png", .{ directory, index }, 0);
+        try staged.replace(destination);
+        if (!workspace.msgSend(bool, "setDesktopImageURL:forScreen:options:error:", .{ url(destination), screen, cls("NSDictionary").msgSend(O, "dictionary", .{}), @as(?*objc.c.id, null) }))
+            return error.WallpaperNotApplied;
+    }
+}
+fn openThumbnail(raw: objc.c.id) bool {
+    if (s.cli.sheet.mode != .thumbnails or s.current == null or s.geometry.scale <= 0) return false;
+    const id = s.displayed orelse return false;
+    const event: O = .{ .value = raw };
+    const location = event.msgSend(n.Point, "locationInWindow", .{});
+    const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
+    const view = displaySnapshot(id, s.current.?);
+    const hit = s.gallery.imageAt(&s.catalog, (location.x * backing - view.offset_x) / view.zoom, (@as(f64, @floatFromInt(view.viewport_height)) - location.y * backing - view.offset_y) / view.zoom) orelse return true;
+    const command = s.settings.hooks[0];
+    if (command.len > 0) {
+        if (!s.hook.busy) {
+            s.hook = .{ .busy = true, .thumbnail = true, .path = hit.entry.path, .template = command, .snapshot = hit.snapshot(view, s.gallery.original_count) };
+            n.dispatch_async_f(n.dispatch_get_global_queue(0x19, 0), s, hookWorker);
+        }
+        return true;
+    }
+    const image_path = string(hit.entry.path);
+    defer image_path.release();
+    const paths = cls("NSArray").msgSend(O, "arrayWithObject:", .{image_path});
+    const previous = s;
+    defer s = previous;
+    openSelection(paths, false) catch {
+        s = previous;
+        notice("Could not open thumbnail", .{});
+    };
+    return true;
+}
+
 fn persistFilelist() !void {
-    try input.save(s.cli.filelist.?, s.entries, null);
+    if (s.gallery.layout != null) return s.gallery.saveFilelist(s.cli.filelist.?, &s.catalog);
+    const list = if (s.cli.multiwindow) s.catalog.entries[0..s.catalog.count] else s.entries;
+    try input.save(s.cli.filelist.?, list, null);
 }
 fn saveFilelistWorker(context: ?*anyopaque) callconv(.c) void {
     sessionContext(context);
@@ -2902,6 +3491,11 @@ const usage =
     \\  -l, --list              -L, --customlist FORMAT
     \\  -U, --loadable          -u, --unloadable       --print-filelist
     \\  -T, --theme NAME        --buttons FILE        --formats
+    \\  -w, --multiwindow        -^, --title FORMAT    -Y, --hide-pointer
+    \\  -K, --caption-path DIR   --draw-exif           --info COMMAND
+    \\  -m, --montage            -i, --index           -t, --thumbnails
+    \\  -o, --output FILE        -O, --output-only FILE
+    \\  -p, --preload            -k, --keep-http       --edit
     \\  -h, --help              -v, --version
     \\  --decode-workers N      CPU decode budget (0: automatic)   --alloc-stats
     \\  --aggressive            Preload the list while memory is available
@@ -2922,8 +3516,11 @@ fn catalogInfo(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) ?cata
 }
 
 fn catalogLoadable(path: [:0]const u8) anyerror!bool {
-    const image = decoder.loadWithAllocator(path, 0, memory.allocator()) catch |err| return switch (err) {
-        error.OutOfMemory => err,
+    return catalogValidate(path, null);
+}
+fn catalogValidate(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) anyerror!bool {
+    const image = decoder.loadWithLimits(path, 0, memory.allocator(), .{ .cancel = cancel }) catch |err| return switch (err) {
+        error.OutOfMemory, error.Cancelled => err,
         else => false,
     };
     image.destroy();
@@ -2952,8 +3549,10 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
     control = &root.control;
     control.* = .{};
     root.renderer = .{};
+    root.downloads = .{ .transfer = @import("network.zig").download };
     defer if (memory.debug_enabled) memory.allocator().destroy(root) else memory.allocator().rawFree(@as([*]u8, @ptrCast(root))[0..@sizeOf(Root)], .of(Root), @returnAddress());
     defer root.renderer.deinit();
+    defer root.downloads.deinit();
     s = &root.sessions[0];
     initState(s, 0, .{});
     control.active[0] = true;
@@ -3014,6 +3613,17 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
             return 2;
         };
     }
+    s.cli.finish() catch |err| {
+        n.output(2, @errorName(err));
+        n.output(2, "\n");
+        return 2;
+    };
+    var fonts: [3]typography.ResolvedFont = @splat(.{});
+    const selected_fonts = [_]*?Font{ &s.cli.text.font, &s.cli.text.menu_font, &s.cli.sheet.title_font };
+    for (&fonts, selected_fonts) |*storage, font| storage.apply(font, &s.cli.font_paths, resolveFont) catch {
+        n.output(2, "yekk: invalid font file\n");
+        return 2;
+    };
     if (s.input_count == 0 and s.cli.filelist == null) {
         if (s.options.start_at) |path| {
             s.input[0] = path;
@@ -3029,18 +3639,37 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
         n.output(2, "yekk: --browse requires exactly one input\n");
         return 2;
     }
-    if (s.cli.listing != .none) {
+    if (s.cli.listing != .none or s.cli.sheet.output_only or s.cli.wallpaper != null) {
         readFilelist() catch |err| {
             n.output(2, @errorName(err));
             n.output(2, "\n");
             return 1;
         };
         s.catalog.probe = catalogInfo;
+        s.catalog.downloads = &root.downloads;
+        s.options.network = s.cli.network();
+        s.catalog.validate = catalogValidate;
         s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
             n.output(2, @errorName(err));
             n.output(2, "\n");
             return 1;
         };
+        if (s.cli.wallpaper != null) {
+            setWallpaper() catch |err| {
+                n.output(2, @errorName(err));
+                n.output(2, "\n");
+                return 1;
+            };
+            return 0;
+        }
+        if (s.cli.sheet.output_only) {
+            buildContactSheet() catch |err| {
+                n.output(2, @errorName(err));
+                n.output(2, "\n");
+                return 1;
+            };
+            return 0;
+        }
         if (s.cli.listing != .paths) {
             input.loadSettings(&s.settings, s.cli.config, s.cli.keys, s.cli.buttons) catch return 2;
             s.cli.apply(&s.settings);
@@ -3060,11 +3689,34 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
         };
         return if (matched) 0 else 1;
     }
+    s.cli.text.mode = s.cli.windowMode();
     control.cli_inputs = !s.cli.default_directory;
     launch() catch |err| {
         n.output(2, @errorName(err));
         n.output(2, "\n");
         return 1;
+    };
+    const use_terminal = !(if (s.cli.filelist) |file| std.mem.eql(u8, file, "-") else false);
+    if (use_terminal) _ = control.terminal.enable();
+    defer control.terminal.disable();
+    const signals = [_]c_int{ c.SIGUSR1, c.SIGUSR2, c.SIGINT, c.SIGTERM };
+    const targets = .{ processNext, processPrevious, processQuit, processQuit };
+    var sources: [signals.len + 1]?*anyopaque = @splat(null);
+    inline for (signals, targets, 0..) |number, target, i| {
+        if (i < 2 or control.terminal.original != null) {
+            _ = c.signal(number, signalHandler);
+            sources[i] = processSource(n.signalType(), @intCast(number), target);
+        }
+    }
+    if (control.terminal.original != null) {
+        sources[signals.len] = processSource(n.readType(), 0, terminalInput);
+        if (sources[signals.len] == null) control.terminal.disable();
+    }
+    defer for (sources) |slot| {
+        if (slot) |event| {
+            n.dispatch_source_cancel(event);
+            n.dispatch_release(event);
+        }
     };
     control.app.msgSend(void, "run", .{});
     control.app.msgSend(void, "setDelegate:", .{nil});

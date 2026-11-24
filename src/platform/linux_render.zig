@@ -150,7 +150,7 @@ const Output = struct {
     encoder: Encoder,
     checker: bool,
     check_size: usize,
-    background: [2]f32,
+    background: [2][3]f32,
     encoded_background: [2][4]u8 = .{ .{ 24, 24, 24, 255 }, .{ 48, 48, 48, 255 } },
     coverage: ?c.VipsRect,
     opaque_source: bool,
@@ -158,10 +158,10 @@ const Output = struct {
         return @intFromBool(self.checker and ((x / self.check_size) ^ (y / self.check_size)) & 1 != 0);
     }
 };
-fn composite(src: [*]const f32, background: f32) [4]f32 {
+fn composite(src: [*]const f32, background: [3]f32) [4]f32 {
     const alpha = if (std.math.isFinite(src[3])) std.math.clamp(src[3], 0, 1) else 0;
     var result: [4]f32 = .{ 0, 0, 0, 1 };
-    inline for (0..3) |ch| result[ch] = (if (std.math.isFinite(src[ch])) src[ch] else 0) + background * (1 - alpha);
+    inline for (0..3) |ch| result[ch] = (if (std.math.isFinite(src[ch])) src[ch] else 0) + background[ch] * (1 - alpha);
     return result;
 }
 // A borrowed output tile; clipping changes its origin without copying native
@@ -299,11 +299,12 @@ fn prepareImpl(image: *Image, view: View, overlay: [:0]const u8, checker: bool, 
         .opaque_source = image.opaque_source,
         .checker = checker,
         .check_size = @intFromFloat(@max(1, 12 * contentScale())),
-        .background = .{ @floatCast(srgbToLinear(24.0 / 255.0)), @floatCast(srgbToLinear(48.0 / 255.0)) },
+        .background = backgroundValues(w, checker),
+        .encoded_background = palette(w, checker),
     };
     if (w.display_transform) |transform| {
         const bg = context.background;
-        const pixels = [2][4]f32{ .{ bg[0], bg[0], bg[0], 1 }, .{ bg[1], bg[1], bg[1], 1 } };
+        const pixels = [2][4]f32{ bg[0] ++ [_]f32{1}, bg[1] ++ [_]f32{1} };
         c.cmsDoTransform(transform, &pixels, &context.encoded_background, 2);
     }
     if (failAllocation()) return error.OutOfMemory;
@@ -512,11 +513,11 @@ pub fn menuConfig(labels: ?[*]const [*:0]const u8, count: c_int, selected: c_int
     w.menu_row_height = row_height;
     w.menu_scale = scale;
 }
-fn textImage(text: [*:0]const u8, width: c_int, scale: f32) !*c.VipsImage {
+pub fn textImage(text: [*:0]const u8, width: c_int, scale: f32, typeface: ?[*:0]const u8, font_file: ?[*:0]const u8) !*c.VipsImage {
     var image: ?*c.VipsImage = null;
     const environment_font = c.g_getenv("YEKK_FONT_FILE");
-    const font = if (environment_font != null) environment_font else if (options.font_file) |path| path.ptr else null;
-    try check(c.vips_text(&image, text, "font", @as([*:0]const u8, "DejaVu Sans 10"), "fontfile", @as(?[*:0]const u8, font), "dpi", @as(c_int, @intFromFloat(@round(72 * scale))), "rgba", @as(c_int, 1), "width", @as(c_int, @max(1, width)), @as(?*anyopaque, null)));
+    const font = font_file orelse if (typeface != null) null else if (environment_font != null) environment_font else if (options.font_file) |path| path.ptr else null;
+    try check(c.vips_text(&image, text, "font", typeface orelse @as([*:0]const u8, "DejaVu Sans 10"), "fontfile", @as(?[*:0]const u8, font), "dpi", @as(c_int, @intFromFloat(@round(72 * scale))), "rgba", @as(c_int, 1), "width", @as(c_int, @max(1, width)), @as(?*anyopaque, null)));
     defer t.unref(image);
     return c.vips_image_copy_memory(image) orelse error.NativeImageFailed;
 }
@@ -557,7 +558,7 @@ fn drawMenu(frame: *Frame) !void {
             }
         }
         const glyph = &w.menu_glyphs[@intCast(item)];
-        if (glyph.* == null) glyph.* = try textImage(labels[@intCast(item)], w.menu_width - 24, w.menu_scale);
+        if (glyph.* == null) glyph.* = try textImage(labels[@intCast(item)], w.menu_width - 24, w.menu_scale, if (w.menu_font[0] == 0) null else &w.menu_font, w.menu_font_file);
         try drawGlyphs(frame, glyph.*.?, w.menu_x + @as(c_int, @intFromFloat(10 * w.menu_scale)), top + @divTrunc(w.menu_row_height - glyph.*.?.Ysize, 2), w.menu_x, top, w.menu_x + w.menu_width, top + w.menu_row_height);
     }
 }
@@ -585,11 +586,23 @@ fn prepareOutput(w: *t.Window) void {
         }
     }
 }
+fn palette(window: *const t.Window, checker: bool) [2][4]u8 {
+    if (!checker) if (window.background_color) |rgb| return @splat(rgb ++ [_]u8{255});
+    return .{ .{ 24, 24, 24, 255 }, .{ 48, 48, 48, 255 } };
+}
+fn backgroundValues(window: *const t.Window, checker: bool) [2][3]f32 {
+    const bytes = palette(window, checker);
+    var values: [2][3]f32 = undefined;
+    for (&values, bytes) |*rgb, encoded| {
+        for (rgb, encoded[0..3]) |*component, value| component.* = @floatCast(srgbToLinear(@as(f64, @floatFromInt(value)) / 255));
+    }
+    return values;
+}
 fn finishLinear(frame: *Frame, overlay: [*:0]const u8, checker: bool) !void {
     const w = t.current();
     prepareOutput(w);
     if (w.display_transform == null and w.encoding == null) w.encoding = .init();
-    const background_values = [_]f32{ @floatCast(srgbToLinear(24.0 / 255.0)), @floatCast(srgbToLinear(48.0 / 255.0)) };
+    const background_values = backgroundValues(w, checker);
     const pixels: [*]f32 = @ptrCast(@alignCast(frame.pixels.?));
     const check_size: usize = @intFromFloat(@max(1, 12 * contentScale()));
     if (w.display_transform == null and overlay[0] == 0 and w.menu_labels == null) {
@@ -599,7 +612,7 @@ fn finishLinear(frame: *Frame, overlay: [*:0]const u8, checker: bool) !void {
             const alpha = if (std.math.isFinite(pixels[offset + 3])) std.math.clamp(pixels[offset + 3], 0, 1) else 0;
             const background = background_values[@intFromBool(checker and ((row / check_size) ^ (x / check_size)) & 1 != 0)];
             inline for (0..3) |channel| {
-                const value = (if (std.math.isFinite(pixels[offset + channel])) pixels[offset + channel] else 0) + background * (1 - alpha);
+                const value = (if (std.math.isFinite(pixels[offset + channel])) pixels[offset + channel] else 0) + background[channel] * (1 - alpha);
                 encoded[offset + channel] = w.encoding.?.encode(value);
             }
             encoded[offset + 3] = 255;
@@ -612,7 +625,7 @@ fn finishLinear(frame: *Frame, overlay: [*:0]const u8, checker: bool) !void {
         const offset = (row * @as(usize, @intCast(frame.width)) + x) * 4;
         const alpha = if (std.math.isFinite(pixels[offset + 3])) std.math.clamp(pixels[offset + 3], 0, 1) else 0;
         const background = background_values[@intFromBool(checker and ((row / check_size) ^ (x / check_size)) & 1 != 0)];
-        for (0..3) |ch| pixels[offset + ch] = (if (std.math.isFinite(pixels[offset + ch])) pixels[offset + ch] else 0) + background * (1 - alpha);
+        for (0..3) |ch| pixels[offset + ch] = (if (std.math.isFinite(pixels[offset + ch])) pixels[offset + ch] else 0) + background[ch] * (1 - alpha);
         pixels[offset + 3] = 1;
     };
     if (overlay[0] != 0) {
@@ -627,7 +640,7 @@ fn finishLinear(frame: *Frame, overlay: [*:0]const u8, checker: bool) !void {
             defer c.g_free(valid);
             const escaped = c.g_markup_escape_text(valid, -1);
             defer c.g_free(escaped);
-            const resident = try textImage(@ptrCast(escaped), frame.width - 16, contentScale());
+            const resident = try textImage(@ptrCast(escaped), frame.width - 16, contentScale(), if (w.overlay_font[0] == 0) null else &w.overlay_font, w.overlay_font_file);
             c.vips_image_set_string(resident, "yekk-overlay", overlay);
             c.vips_image_set_int(resident, "yekk-overlay-width", frame.width);
             t.clear(&w.overlay_cache);

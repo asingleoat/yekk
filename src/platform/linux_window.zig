@@ -175,16 +175,19 @@ pub fn density() f32 {
     const value = c.SDL_GetWindowPixelDensity(t.current().window);
     return if (std.math.isFinite(value) and value > 0) value else 1;
 }
-pub fn resizeImage(width: c_int, height: c_int) void {
+pub fn resizeImage(width: c_int, height: c_int, clip: bool) void {
     const scale: f64 = density();
-    geometry(.{ .width = @intFromFloat(@min(std.math.maxInt(c_int), @max(1, @ceil(@as(f64, @floatFromInt(width)) / scale)))), .height = @intFromFloat(@min(std.math.maxInt(c_int), @max(1, @ceil(@as(f64, @floatFromInt(height)) / scale)))) });
+    geometryWithClip(.{ .width = @intFromFloat(@min(std.math.maxInt(c_int), @max(1, @ceil(@as(f64, @floatFromInt(width)) / scale)))), .height = @intFromFloat(@min(std.math.maxInt(c_int), @max(1, @ceil(@as(f64, @floatFromInt(height)) / scale)))) }, clip);
 }
 pub fn geometry(request: @import("geometry").Geometry) void {
+    geometryWithClip(request, true);
+}
+pub fn geometryWithClip(request: @import("geometry").Geometry, clip: bool) void {
     const window = t.current().window;
     var bounds: c.SDL_Rect = undefined;
     var width: c_int = @intCast(request.width);
     var height: c_int = @intCast(request.height);
-    if (c.SDL_GetDisplayUsableBounds(c.SDL_GetDisplayForWindow(window), &bounds)) {
+    if (clip and c.SDL_GetDisplayUsableBounds(c.SDL_GetDisplayForWindow(window), &bounds)) {
         width = @min(width, bounds.w);
         height = @min(height, bounds.h);
     }

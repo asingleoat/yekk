@@ -26,6 +26,9 @@ to the list. You can supply several files and directories.
 | `-\| FILE`, `--start-at FILE` | Start with this file. Without other inputs, include images from its directory. |
 | `-r`, `--recursive` | Include subdirectories. Do not follow symbolic links to directories. |
 | `--no-recursive` | Exclude subdirectories. |
+| `-p`, `--preload` | Decode each file once before viewing and drop files that cannot be decoded. |
+| `-q`, `--quiet` | Suppress warnings from the file scan and decode checks. |
+| `-V`, `--verbose` | Print the number of indexed files. |
 | `-S MODE`, `--sort MODE` | Choose the ordering described below. |
 | `--min-dimension WIDTHxHEIGHT`, `--max-dimension WIDTHxHEIGHT` | Limit image dimensions in pixels. A zero or negative axis has no limit. |
 | `--version-sort` | Compare numbers numerically in `name`, `filename` or `dirname` ordering. |
@@ -49,6 +52,18 @@ selection. For `--start-at`, use the same path spelling as the input. If
 there is no exact match, Yekk starts at the first entry with the same
 filename.
 
+### URLs
+
+Supply an HTTP or HTTPS URL in place of a filename. Downloads run on an indexing
+worker. The viewer removes temporary downloads at exit. `-k` or `--keep-http`
+keeps the downloaded files. Use `-j DIR` to choose where to keep them. Exported
+file lists retain the URL so that they can reopen it. `--insecure` disables
+TLS certificate and host verification.
+
+Press **r** to download the current URL again. `--reload SECONDS` periodically
+downloads the current URL. Use `--no-conversion-cache` to download a URL
+again when you return to it after viewing another image.
+
 ### Window size and zoom
 
 The **viewport** is the image-display area inside the window.
@@ -65,6 +80,15 @@ inside the viewport without changing its zoom.
 | `-x`, `--borderless` | Remove window borders and title bar. |
 | `-F`, `--fullscreen` | Use fullscreen. |
 | `-Z`, `--auto-zoom` | Enlarge small images to fit. |
+| `-w`, `--multiwindow` | Open each image in its own window. The session accepts up to eight windows. |
+| `-^`, `--title FORMAT` | Set the window title. Use `%n` for the name or `%w×%h` for pixel dimensions. |
+| `-Y`, `--hide-pointer` | Hide the pointer over the viewer. Press **o** to toggle it. |
+| `-N`, `--no-menus` | Disable the viewer's action menu. |
+| `--no-screen-clip` | Allow image size or geometry to exceed the screen size where the desktop permits it. |
+| `--force-aliasing` | Start with nearest-neighbor image scaling. |
+| `-B`, `--image-bg STYLE` | Set the background behind the image. Use `default`, `checks`, a common color name or a hex RGB value. |
+| `--scroll-step PIXELS` | Set the number of backing pixels moved by Ctrl+arrow. A negative value reverses direction. |
+| `--tap-zones` | Click the left half to go back and the right half to go forward. |
 | `-.`, `--scale-down` | Reduce large images to fit. |
 | `--zoom PERCENT` | Set the initial zoom percentage. `100` means actual size. |
 | `--zoom max` | Use the same sizing behavior as `-Z`. |
@@ -154,6 +178,69 @@ The other metadata placeholders are listed under
 once for each row or path printed. These commands write to the terminal or
 output stream that started Yekk.
 
+## Captions, metadata and output
+
+- `-K DIR` or `--caption-path DIR` reads captions from `DIR`. A relative
+  directory is resolved from each image. For `photos/a.jpg` and `-K captions`,
+  the caption is `photos/captions/a.jpg.txt`.
+- Press **c** to edit a caption. Enter saves, Ctrl+Enter adds a line, and
+  Escape cancels. Create the caption directory before saving. Captions can
+  contain up to 1,024 bytes of text.
+- `--draw-exif` shows available camera and exposure information. Press **e**
+  to toggle it. Yekk reads these fields from JPEG, PNG and TIFF metadata.
+- `--info COMMAND` runs a shell command for the displayed image and shows
+  its standard output. Use the command placeholders below. Prefix the
+  command with `;` to start hidden. Press **i** to toggle it. The command
+  runs on a worker with a five-second time limit.
+
+Press **s** to save a copy with the current rotation and mirrors. The file uses
+the source dimensions and is saved in the directory selected by `-j`. Yekk
+writes JPEG, PNG and TIFF. For other source formats, it writes a PNG copy.
+
+With `--edit`, rotation and mirror keys update JPEG files in place. Yekk
+applies a lossless transform only when it can keep every pixel. It replaces
+the file after the transform succeeds.
+
+### Contact sheets
+
+| Option | Effect |
+| --- | --- |
+| `-m`, `--montage` | Show a grid of images. |
+| `-i`, `--index` | Show a grid with filenames. |
+| `-I`, `--fullindex` | Add file sizes and image dimensions. |
+| `-t`, `--thumbnails` | Show a grid. Click an image to open it in its own window. |
+| `-y`, `--thumb-width` and `-E`, `--thumb-height` | Set the thumbnail dimensions in pixels. |
+| `-W`, `--limit-width` and `-H`, `--limit-height` | Limit the sheet dimensions in pixels. |
+| `--index-info FORMAT` | Set the text below images in index and thumbnail modes. |
+| `-b`, `--bg` | Use an image or `trans` for a transparent background. |
+| `-a`, `--alpha` | Set thumbnail opacity from 0 to 255. |
+| `-s`, `--stretch` | Enlarge small images to fill their thumbnail space. |
+| `-X`, `--ignore-aspect` | Stretch each image to the set thumbnail width and height. |
+| `-o`, `--output FILE` | Save the sheet and show it. |
+| `-O`, `--output-only FILE` | Save the sheet without opening a window. |
+
+Use a `.png`, `.jpg` or `.tif` filename for the output. A PNG can carry a
+transparent background.
+
+Use `-P` to cache thumbnails up to 256×256 pixels. Yekk stores these files in
+its own cache. `-J N` requests a preview after every `N` thumbnails. Zero
+shows the sheet only when it is complete.
+
+`-e FONT/SIZE` sets the font for text overlays and contact sheet labels.
+`-M FONT/SIZE` sets the menu font. Use a system font family name and a point
+size, for example `--font 'DejaVu Sans/11'`. You can also name a `.ttf` or
+`.otf` file. Use `-C DIR` or `--fontpath DIR` to add a font search directory.
+`-@ FONT/SIZE` adds a heading
+to a contact sheet. Set its text with `--title`. `--thumb-title FORMAT` sets
+the title of windows opened from the thumbnail grid.
+
+### Wallpaper
+
+Use `--bg-center`, `--bg-fill`, `--bg-max`, `--bg-scale` or `--bg-tile` with
+an image to set the desktop wallpaper. On Linux, the desktop must provide the
+Wallpaper portal. It accepts one image for the desktop. On macOS, you can
+supply one image per display or select a display with `--xinerama-index`.
+
 ## Triage hooks
 
 A **command hook** runs a shell command when you press its assigned key.
@@ -169,7 +256,8 @@ yekk --draw-actions \
 
 Press **1** or **2** to move the displayed file. `--action1` through `--action9`
 assign commands to keys 1–9. `-A COMMAND` or `--action COMMAND` assigns a command
-to Return and 0. `[Title]` sets the label shown by `-G` or `--draw-actions`.
+to Return and 0. In thumbnail mode, clicking a tile runs this command on that
+image. `[Title]` sets the label shown by `-G` or `--draw-actions`.
 Use `-d` or `--draw-filename` to display the filename over the image.
 
 A command succeeds when its exit status is 0. After success, Yekk selects the
@@ -271,6 +359,9 @@ Hold an arrow key to repeat navigation or zoom at the system repeat rate.
 | x | Close this window. |
 | q / Escape | Quit all windows. |
 
+When a terminal starts Yekk, it can also send viewer keys. `SIGUSR1` moves
+forward and `SIGUSR2` moves backward in the focused window.
+
 Hold a next or previous key to view images in order. Each image stays on screen
 for at least one frame before another key repeat can advance. Release the key to
 stop. A new press can skip an image that is still loading.
@@ -365,14 +456,9 @@ described above. Yekk's sizing modes are:
 The `natural` sort mode is a Yekk extension. Directory searches skip names
 starting with `.`. Explicit paths can open these files.
 
-Yekk does not support these feh features:
-
-- Pointer hiding.
-- Full X11 keysym/keypad coverage and keyboard input from the terminal.
-- Captions, EXIF overlays and `--info` shell overlays.
-- Source editing and saving transformed images.
-- Signal controls and URL downloads.
-- Montage, index and thumbnail modes.
-- X11/window-manager options, wallpaper setting and `-w`.
+X11 window embedding and window-manager hints require X11. Yekk uses the
+desktop wallpaper settings and manages its image cache using system memory
+pressure. `--sort` sets the order when Yekk opens a list. Run `yekk --formats`
+to see which image formats the decoder supports.
 
 Unknown options return exit status 2. See [validation](validation.md) for tests.

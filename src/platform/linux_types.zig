@@ -71,12 +71,20 @@ pub const Event = struct {
     drag_y: f32 = 0,
     drag_zoom: f32 = 0,
     timestamp: u64 = 0,
+    text: [128]u8 = @splat(0),
+    text_len: usize = 0,
+    process_navigation: bool = false,
 };
 pub const Geometry = struct { width: c_int = 0, height: c_int = 0, x: c_int = 0, y: c_int = 0, valid: c_int = 0 };
 pub const Metadata = struct { width: u32 = 0, height: u32 = 0, bits: u32 = 0, alpha: bool = false, format: [32]u8 = @splat(0) };
 pub const window_limit = 8;
-pub const Selection = struct { bytes: [1048576]u8 = undefined, offsets: [16384]u32 = undefined, count: u32 = 0, used: u32 = 0, window_id: u32 = 0 };
+pub const Selection = struct { bytes: [1048576]u8 = undefined, offsets: [16384]u32 = undefined, count: u32 = 0, used: u32 = 0, window_id: u32 = 0, from_thumbnail: bool = false };
 pub const Window = struct {
+    background_color: ?[3]u8 = null,
+    overlay_font: [256:0]u8 = @splat(0),
+    menu_font: [256:0]u8 = @splat(0),
+    overlay_font_file: ?[*:0]const u8 = null,
+    menu_font_file: ?[*:0]const u8 = null,
     refresh_interval: f64 = 1.0 / 60.0,
     window: ?*c.SDL_Window = null,
     renderer: ?*c.SDL_Renderer = null,

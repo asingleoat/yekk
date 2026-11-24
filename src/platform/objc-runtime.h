@@ -6,6 +6,7 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <termios.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>

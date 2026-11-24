@@ -93,3 +93,72 @@ pub fn pressureClose(fd: c_int) void {
         _ = c.close(fd);
     }
 }
+
+const wallpaper_bus: [:0]const u8 = "org.freedesktop.portal.Desktop";
+const Response = struct { loop: *c.GMainLoop, code: c_uint = 2 };
+fn wallpaperResponse(_: ?*c.GDBusConnection, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, parameters: ?*c.GVariant, userdata: ?*anyopaque) callconv(.c) void {
+    const state: *Response = @ptrCast(@alignCast(userdata.?));
+    if (parameters) |value| {
+        const code = c.g_variant_get_child_value(value, 0);
+        if (code != null) {
+            defer c.g_variant_unref(code);
+            state.code = c.g_variant_get_uint32(code);
+        }
+    }
+    c.g_main_loop_quit(state.loop);
+}
+fn wallpaperTimeout(userdata: ?*anyopaque) callconv(.c) c.gboolean {
+    const state: *Response = @ptrCast(@alignCast(userdata.?));
+    c.g_main_loop_quit(state.loop);
+    return 0;
+}
+pub fn setWallpaper(fd: c_int) !void {
+    var err: ?*c.GError = null;
+    defer if (err) |value| c.g_error_free(value);
+    const bus = c.g_bus_get_sync(c.G_BUS_TYPE_SESSION, null, &err) orelse return error.WallpaperPortalUnavailable;
+    defer t.unref(bus);
+    const context = c.g_main_context_new() orelse return error.OutOfMemory;
+    defer c.g_main_context_unref(context);
+    c.g_main_context_push_thread_default(context);
+    defer c.g_main_context_pop_thread_default(context);
+    const loop = c.g_main_loop_new(context, 0) orelse return error.OutOfMemory;
+    defer c.g_main_loop_unref(loop);
+    const files = c.g_unix_fd_list_new() orelse return error.OutOfMemory;
+    defer t.unref(files);
+    const index = c.g_unix_fd_list_append(files, fd, &err);
+    if (index < 0) return error.WallpaperPortalUnavailable;
+
+    var token_buffer: [96]u8 = undefined;
+    const token = try std.fmt.bufPrintSentinel(&token_buffer, "yekk_{x}_{x}", .{ c.getpid(), @as(u64, @bitCast(c.g_get_monotonic_time())) }, 0);
+    const sender = t.text(c.g_dbus_connection_get_unique_name(bus));
+    if (sender.len < 2 or sender[0] != ':') return error.WallpaperPortalUnavailable;
+    var path_buffer: [256]u8 = undefined;
+    const request = try std.fmt.bufPrintSentinel(&path_buffer, "/org/freedesktop/portal/desktop/request/{s}/{s}", .{ sender[1..], token }, 0);
+    for (path_buffer[0..request.len]) |*byte| if (byte.* == '.') {
+        byte.* = '_';
+    };
+    var state: Response = .{ .loop = loop };
+    const subscription = c.g_dbus_connection_signal_subscribe(bus, wallpaper_bus, "org.freedesktop.portal.Request", "Response", request.ptr, null, c.G_DBUS_SIGNAL_FLAGS_NONE, wallpaperResponse, &state, null);
+    defer c.g_dbus_connection_signal_unsubscribe(bus, subscription);
+    const timeout = c.g_timeout_source_new(30000) orelse return error.OutOfMemory;
+    defer c.g_source_unref(timeout);
+    c.g_source_set_callback(timeout, wallpaperTimeout, &state, null);
+    _ = c.g_source_attach(timeout, context);
+    defer c.g_source_destroy(timeout);
+
+    const dictionary_type = c.g_variant_type_new("a{sv}") orelse return error.OutOfMemory;
+    defer c.g_variant_type_free(dictionary_type);
+    const dict = c.g_variant_builder_new(dictionary_type) orelse return error.OutOfMemory;
+    defer c.g_variant_builder_unref(dict);
+    c.g_variant_builder_add(dict, "{sv}", @as([*:0]const u8, "handle_token"), c.g_variant_new_string(token.ptr));
+    c.g_variant_builder_add(dict, "{sv}", @as([*:0]const u8, "set-on"), c.g_variant_new_string("background"));
+    c.g_variant_builder_add(dict, "{sv}", @as([*:0]const u8, "show-preview"), c.g_variant_new_boolean(0));
+    const args = c.g_variant_new("(sh@a{sv})", @as([*:0]const u8, ""), index, c.g_variant_builder_end(dict));
+    const reply = c.g_dbus_connection_call_with_unix_fd_list_sync(bus, wallpaper_bus, "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Wallpaper", "SetWallpaperFile", args, null, c.G_DBUS_CALL_FLAGS_NONE, 5000, files, null, null, &err) orelse return error.WallpaperPortalUnavailable;
+    defer c.g_variant_unref(reply);
+    const handle = c.g_variant_get_child_value(reply, 0) orelse return error.WallpaperPortalUnavailable;
+    defer c.g_variant_unref(handle);
+    if (!std.mem.eql(u8, t.text(c.g_variant_get_string(handle, null)), request)) return error.WallpaperPortalUnavailable;
+    c.g_main_loop_run(loop);
+    if (state.code != 0) return error.WallpaperNotApplied;
+}

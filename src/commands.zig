@@ -52,13 +52,17 @@ pub fn run(command: [:0]const u8, cancel: *const std.atomic.Value(bool)) !Result
     return runWithOutput(command, cancel, .capture);
 }
 
-pub fn runWithOutput(command: [:0]const u8, cancel: *const std.atomic.Value(bool), output: enum { capture, inherit }) !Result {
+pub fn runInfo(command: [:0]const u8, cancel: *const std.atomic.Value(bool)) !Result {
+    return runWithOutput(command, cancel, .stdout_only);
+}
+
+pub fn runWithOutput(command: [:0]const u8, cancel: *const std.atomic.Value(bool), output: enum { capture, inherit, stdout_only }) !Result {
     var result: Result = .{};
     if (cancel.load(.acquire)) {
         result.cancelled = true;
         return result;
     }
-    const pipe = if (output == .capture) try capturePipe() else null;
+    const pipe = if (output != .inherit) try capturePipe() else null;
     var write_open = true;
     defer if (pipe) |fds| {
         _ = c.close(fds[0]);
@@ -70,7 +74,7 @@ pub fn runWithOutput(command: [:0]const u8, cancel: *const std.atomic.Value(bool
     if (c.posix_spawn_file_actions_addopen(&files, 0, "/dev/null", c.O_RDONLY, 0) != 0) return error.SpawnFailed;
     if (pipe) |fds| {
         if (c.posix_spawn_file_actions_adddup2(&files, fds[1], 1) != 0 or
-            c.posix_spawn_file_actions_adddup2(&files, fds[1], 2) != 0 or
+            (if (output == .stdout_only) c.posix_spawn_file_actions_addopen(&files, 2, "/dev/null", c.O_WRONLY, 0) else c.posix_spawn_file_actions_adddup2(&files, fds[1], 2)) != 0 or
             c.posix_spawn_file_actions_addclose(&files, fds[0]) != 0 or
             c.posix_spawn_file_actions_addclose(&files, fds[1]) != 0) return error.SpawnFailed;
     } else if (n.darwin) {
@@ -94,10 +98,11 @@ pub fn runWithOutput(command: [:0]const u8, cancel: *const std.atomic.Value(bool
         _ = c.close(fds[1]);
         write_open = false;
     }
+    const deadline = if (output == .stdout_only) n.now() + 5 else std.math.inf(f64);
     var terminated_at: ?f64 = null;
     while (true) {
         const drained_batch = if (pipe) |fds| drain(fds[0], &result) else false;
-        if (cancel.load(.acquire) and terminated_at == null) {
+        if (terminated_at == null and (cancel.load(.acquire) or n.now() >= deadline)) {
             result.cancelled = true;
             _ = c.kill(-pid, c.SIGTERM);
             terminated_at = n.now();

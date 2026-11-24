@@ -9,7 +9,7 @@ let
     # x265's pinned recipe records its NUMA library as a native build input.
     startSet = map entry (with pkgs; [
       glib pango libheif libjxl numactl libimagequant cgif
-      libexif libhwy libxml2 expat fontconfig
+      libexif libhwy libxml2 expat fontconfig curl
     ]);
     operator = item: map entry (lib.filter lib.isDerivation (
       (item.package.buildInputs or []) ++ (item.package.propagatedBuildInputs or [])
@@ -61,7 +61,7 @@ let
     ];
     postFixup = "";
   });
-  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes libraw ] ++ privateMetadata;
+  dependencies = [ sdl3 vips libtiff lcms2 libdeflate zlib libjpeg libpng libwebp pkgs.libx11 pkgs.libxi pkgs.libxext pkgs.libxfixes libraw pkgs.curl ] ++ privateMetadata;
   sourcePackages = dependencies ++ [ pkgs.glibc pkgs.stdenv.cc.cc pkgs.dejavu_fonts zig ];
   sourceInputs = lib.unique (lib.concatMap (package:
     lib.optional (package ? src && lib.isDerivation package.src) package.src

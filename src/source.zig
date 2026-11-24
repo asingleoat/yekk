@@ -40,6 +40,9 @@ pub fn rawCandidate(path: []const u8) bool {
     return false;
 }
 pub const exifOrientation = @import("exif.zig").orientation;
+pub const describeExif = @import("exif.zig").describe;
+pub const composeOrientation = @import("exif.zig").compose;
+pub const normalizeExif = @import("exif.zig").normalizeOrientation;
 pub const Orientation = @import("exif.zig").Orientation;
 pub const Range = struct {
     file: Open,

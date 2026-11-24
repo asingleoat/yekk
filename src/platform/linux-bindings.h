@@ -4,6 +4,8 @@
 #endif
 #include <vips/vips.h>
 #include <gio/gio.h>
+#include <fontconfig/fontconfig.h>
+#include <fontconfig/fcfreetype.h>
 #include <SDL3/SDL.h>
 #include <lcms2.h>
 #include <sys/stat.h>
