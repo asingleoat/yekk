@@ -70,7 +70,6 @@ pub fn build(b: *std.Build) !void {
     root.addImport("pnm", pnm);
     root.addImport("png", png);
     root.addImport("jpeg", jpeg);
-    try linkNetwork(b, root, target, optimize);
     codecs.addTo(root);
     root.addImport("raster", raster);
     const geometry = b.createModule(.{ .root_source_file = b.path("src/geometry.zig"), .target = target, .optimize = optimize });
@@ -261,7 +260,6 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     const jpeg = try jpegModule(b, target, optimize, source, raster, tiff.import_table.get("pixel_storage").?, portable);
     native.addImport("jpeg", jpeg);
     root.addImport("jpeg", jpeg);
-    try linkNetwork(b, root, target, optimize);
     const runtime_module = runtime_options.createModule();
     native.addImport("build_options", runtime_module);
     try linkLinux(b, native, portable);
@@ -316,7 +314,6 @@ fn buildLinux(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     decoder_tests.addImport("linux", native);
     decoder_tests.addImport("jpeg", jpeg);
     decoder_tests.addImport("png", png);
-    try linkNetwork(b, decoder_tests, target, optimize);
     decoder_tests.addImport("build_options", runtime_module);
     try linkLinux(b, decoder_tests, portable);
     if (b.option(bool, "test-desktop", "Build private Linux desktop interoperability fixtures") orelse false) {
@@ -498,21 +495,6 @@ fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         try linkLinuxLibraries(b, jpeg, portable, b.run(if (portable) &.{ "pkg-config", "--static", "--libs-only-L", "--libs-only-l", "libturbojpeg" } else &.{ "pkg-config", "--libs-only-L", "--libs-only-l", "libturbojpeg" }));
     }
     return jpeg;
-}
-
-fn linkNetwork(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) !void {
-    const include = b.graph.environ_map.get("YEKK_CURL_INCLUDE") orelse return error.EnterNixDevelopmentShell;
-    const bindings = b.addTranslateC(.{ .root_source_file = b.path("src/platform/curl-bindings.h"), .target = target, .optimize = optimize });
-    bindings.addSystemIncludePath(.{ .cwd_relative = include });
-    if (target.result.os.tag == .macos) {
-        const sdk = b.graph.environ_map.get("SDKROOT") orelse return error.EnterNixDevelopmentShell;
-        bindings.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/include" }) });
-    }
-    const library = b.graph.environ_map.get("YEKK_CURL_LIB") orelse return error.EnterNixDevelopmentShell;
-    module.addLibraryPath(.{ .cwd_relative = library });
-    module.addRPath(.{ .cwd_relative = library });
-    module.addImport("curl_bindings", bindings.createModule());
-    module.linkSystemLibrary("curl", .{ .use_pkg_config = .no });
 }
 
 const PhotoModules = struct {

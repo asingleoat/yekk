@@ -8,6 +8,44 @@ const hooks = @import("hooks.zig");
 const memory = @import("memory.zig");
 const output = @import("image_output.zig");
 
+// The source file for a generated sheet must live until its viewing session closes.
+var sheet_workspace: struct {
+    lock: std.atomic.Mutex = .unlocked,
+    directory: [4096]u8 = undefined,
+    len: usize = 0,
+    next: usize = 0,
+
+    fn newPath(self: *@This(), buffer: []u8) ![:0]const u8 {
+        while (!self.lock.tryLock()) _ = c.poll(null, 0, 1);
+        defer self.lock.unlock();
+        if (self.len == 0) {
+            const path = try std.fmt.bufPrintSentinel(&self.directory, "{s}/yekk-sheets-XXXXXX", .{output.temporaryDirectory()}, 0);
+            if (c.mkdtemp(path.ptr) == null) return error.ImageOutputFailed;
+            self.len = path.len;
+        }
+        const path = try std.fmt.bufPrintSentinel(buffer, "{s}/sheet-{d}.png", .{ self.directory[0..self.len], self.next }, 0);
+        self.next += 1;
+        return path;
+    }
+} = .{};
+
+// Call after all sheet workers and viewers have finished.
+pub fn removeTemporarySheets() void {
+    if (sheet_workspace.len == 0) return;
+    const path = sheet_workspace.directory[0..sheet_workspace.len :0];
+    if (runtime.files.opendir(path.ptr)) |directory| {
+        const fd = c.dirfd(directory);
+        while (runtime.files.readdir(directory)) |entry| {
+            const name = std.mem.sliceTo(&entry.*.d_name, 0);
+            if (std.mem.startsWith(u8, name, "sheet-")) _ = c.unlinkat(fd, &entry.*.d_name, 0);
+        }
+        _ = c.closedir(directory);
+    }
+    _ = c.rmdir(path.ptr);
+    sheet_workspace.len = 0;
+    sheet_workspace.next = 0;
+}
+
 pub const Options = struct {
     mode: enum { viewer, montage, index, fullindex, thumbnails } = .viewer,
     destination: ?[:0]const u8 = null,
@@ -165,7 +203,6 @@ const Cache = struct {
     scratch: []u8,
 
     fn tile(self: Cache, canvas: Canvas, entry: catalog.Entry, region: Rect, options: Options, state: *const catalog.Catalog, backend: anytype) !catalog.Dimensions {
-        if (entry.downloaded) return backend.tile(canvas, entry.path, region, options);
         var filename: [4096]u8 = undefined;
         const path = cacheName(&filename, self.directory, entry, region, options) catch return backend.tile(canvas, entry.path, region, options);
         var cached_opts = options;
@@ -239,7 +276,7 @@ pub const Gallery = struct {
     pub fn saveFilelist(self: *const Gallery, path: [:0]const u8, state: *const catalog.Catalog) !void {
         return @import("session_input.zig").saveWithFirst(path, state.entries[0..self.original_count], self.original_first);
     }
-    pub fn build(self: *Gallery, state: *catalog.Catalog, options: Options, temporary_directory: [:0]const u8, context: anytype, backend: anytype) !void {
+    pub fn build(self: *Gallery, state: *catalog.Catalog, options: Options, context: anytype, backend: anytype) !void {
         const entries = state.entries[0..state.count];
         const layout = try Layout.init(options, entries.len);
         self.total.store(layout.count, .release);
@@ -295,7 +332,7 @@ pub const Gallery = struct {
             }
         }
         if (rendered == 0) return error.NoLoadableImages;
-        const destination = options.destination orelse try std.fmt.bufPrintSentinel(&self.path, "{s}/sheet-{d}.png", .{ temporary_directory, state.downloads.?.uniqueNumber() }, 0);
+        const destination = options.destination orelse try sheet_workspace.newPath(&self.path);
         const format = output.Format.fromPath(destination) orelse return error.UnsupportedOutputFormat;
         var staged: output.Temporary = .{};
         defer staged.deinit();

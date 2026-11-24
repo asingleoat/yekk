@@ -28,7 +28,7 @@ pub fn run(
     var cancel: std.atomic.Value(bool) = .init(false);
     for (entries) |entry| {
         if (listing == .paths) {
-            try outputPath(entry.savedPath());
+            try outputPath(entry.path);
             continue;
         }
         var metadata = catalog_state.listingInfo(entry);

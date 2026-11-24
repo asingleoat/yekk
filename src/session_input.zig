@@ -244,8 +244,8 @@ const Entries = struct {
     }
     fn path(self: Entries, index: usize) [:0]const u8 {
         const id = if (self.order) |ids| ids[index] else index;
-        if (id == 0 and self.first != null) return self.first.?.savedPath();
-        return self.entries[id].savedPath();
+        if (id == 0 and self.first != null) return self.first.?.path;
+        return self.entries[id].path;
     }
 };
 

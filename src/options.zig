@@ -42,7 +42,6 @@ pub const Iterator = struct {
                 'q' => "quiet",
                 'V' => "verbose",
                 'p' => "preload",
-                'k' => "keep-http",
                 'm' => "montage",
                 'i' => "index",
                 'I' => "fullindex",

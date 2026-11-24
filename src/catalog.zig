@@ -3,7 +3,6 @@ const std = @import("std");
 const c = @import("system");
 const runtime = @import("runtime");
 const files = runtime.files;
-const remote = @import("remote.zig");
 pub const capacity = 16384;
 pub const path_capacity = 8 * 1024 * 1024;
 pub const Dimensions = struct {
@@ -45,11 +44,6 @@ pub const Entry = struct {
     id: usize,
     mtime: i128 = 0,
     bytes: i64 = 0,
-    downloaded: bool = false,
-
-    pub fn savedPath(self: Entry) [:0]const u8 {
-        return if (self.downloaded) self.display() else self.path;
-    }
     pub fn display(self: Entry) [:0]const u8 {
         return self.label orelse self.path;
     }
@@ -69,7 +63,6 @@ pub const Options = struct {
     preload: bool = false,
     quiet: bool = false,
     verbose: bool = false,
-    network: remote.Options = .{},
 
     pub fn needsInfo(self: Options) bool {
         return self.minimum.width != 0 or self.minimum.height != 0 or
@@ -92,12 +85,11 @@ pub const Catalog = struct {
     on_initial: ?*const fn (Entry) void = null,
     probe: ?Probe = null,
     validate: ?Validate = null,
-    downloads: ?*remote.Session = null,
     // Populated by metadata sorting, filtering or listing.
     info: [capacity]Info = undefined,
     info_ready: bool = false,
 
-    fn add(self: *Catalog, path: []const u8, label: ?[]const u8, st: c.struct_stat, downloaded: bool) !void {
+    fn add(self: *Catalog, path: []const u8, label: ?[]const u8, st: c.struct_stat) !void {
         if (self.selected) |selected| if (std.mem.eql(u8, selected, path)) {
             for (self.entries[0..self.count]) |e| if (std.mem.eql(u8, e.path, path)) return;
         };
@@ -105,7 +97,7 @@ pub const Catalog = struct {
         const stored = try self.storePath(path);
         const display = if (label) |value| if (std.mem.eql(u8, value, path)) null else try self.storePath(value) else null;
         const modified = if (runtime.darwin) st.st_mtimespec else st.st_mtim;
-        const entry: Entry = .{ .path = stored, .label = display, .id = self.count, .downloaded = downloaded, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
+        const entry: Entry = .{ .path = stored, .label = display, .id = self.count, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
         self.entries[self.count] = entry;
         self.count += 1;
     }
@@ -120,19 +112,15 @@ pub const Catalog = struct {
     }
 
     pub fn build(self: *Catalog, inputs: []const [:0]const u8, options: Options) !void {
+        // Reject the whole selection before publishing an initial image or saving a file list.
+        if (options.start_at) |path| try requireLocalPath(path);
+        for (inputs) |path| try requireLocalPath(path);
         const keep_labels = options.report_paths or options.start_at != null;
         for (inputs, 0..) |input, argument| {
             if (self.cancel) |cancel| if (cancel.load(.acquire)) return error.Cancelled;
             var resolved: [4096]u8 = undefined;
-            var staging: [4096]u8 = undefined;
-            const downloaded = remote.isUrl(input);
-            const local = if (downloaded) (self.downloads orelse return error.NetworkUnavailable).fetch(&staging, input, options.network, self.cancel) catch |err| {
-                if (err == error.Cancelled) return err;
-                if (!options.quiet) diagnosePath("yekk: cannot download ", input);
-                continue;
-            } else input;
             var st: c.struct_stat = undefined;
-            if (files.stat(local.ptr, &st) != 0) {
+            if (files.stat(input.ptr, &st) != 0) {
                 if (!options.report_paths) return error.PathNotReadable;
                 if (!options.quiet) diagnosePath("yekk: cannot read ", input);
                 continue;
@@ -141,13 +129,13 @@ pub const Catalog = struct {
                 if (c.realpath(input.ptr, &resolved) == null) return error.PathNotReadable;
                 try self.directory(std.mem.sliceTo(&resolved, 0), if (keep_labels) input else null, options, 0);
             } else if (st.st_mode & c.S_IFMT == c.S_IFREG) {
-                const path = try operationPath(local, &resolved);
-                try self.add(path, if (keep_labels or downloaded) input else null, st, downloaded);
+                const path = try operationPath(input, &resolved);
+                try self.add(path, if (keep_labels) input else null, st);
                 if (argument == 0) {
                     self.initial = self.entries[self.count - 1];
                     if (!options.preload and !options.needsInfo()) if (self.on_initial) |callback| callback(self.initial.?);
                 }
-                if (options.browse and !downloaded and inputs.len == 1) {
+                if (options.browse and inputs.len == 1) {
                     self.selected = self.entries[0].path;
                     try self.directory(std.fs.path.dirname(path).?, if (keep_labels) std.fs.path.dirname(input) orelse "." else null, options, 0);
                     if (options.sort != .none) std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
@@ -264,7 +252,7 @@ pub const Catalog = struct {
                 if (kind == c.S_IFLNK) {
                     if (files.stat(child.ptr, &st) != 0 or st.st_mode & c.S_IFMT != c.S_IFREG) continue;
                 } else if (kind != c.S_IFREG) continue;
-                try self.add(child, label, st, false);
+                try self.add(child, label, st);
             }
         }
         if (options.sort != .none) std.mem.sort(Entry, self.entries[start..self.count], Sort.natural, less);
@@ -297,6 +285,12 @@ fn operationPath(input: [:0]const u8, output: *[4096]u8) ![:0]const u8 {
     @memcpy(output[used..][0..leaf.len], leaf);
     output[used + leaf.len] = 0;
     return output[0 .. used + leaf.len :0];
+}
+
+fn requireLocalPath(path: []const u8) !void {
+    for ([_][]const u8{ "http://", "https://" }) |scheme| {
+        if (path.len >= scheme.len and std.ascii.eqlIgnoreCase(path[0..scheme.len], scheme)) return error.RemoteUrlsUnsupported;
+    }
 }
 
 pub fn candidate(name: []const u8) bool {

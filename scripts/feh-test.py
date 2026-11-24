@@ -35,6 +35,17 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     filelist.write_text(''.join(str(path) + '\n' for path in plain))
     assert cli('-f', filelist, '--print-filelist').splitlines() == list(map(str, plain))
     assert cli('--sort=filename', '--version-sort', '--print-filelist', *plain).splitlines() == list(map(str, plain))
+    # A URL in a mixed selection must fail before any list entries are emitted.
+    for url in ('http://127.0.0.1:1/test.png', 'https://127.0.0.1:1/test.png'):
+        result = subprocess.run([str(viewer), '--print-filelist', str(plain[0]), url],
+                                cwd=work, env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 1 and not result.stdout and 'RemoteUrlsUnsupported' in result.stderr, result
+    original_list = f'{plain[0]}\nHTTPS://127.0.0.1:1/test.png\n'
+    filelist.write_text(original_list)
+    result = subprocess.run([str(viewer), '-f', str(filelist), '--print-filelist'],
+                            cwd=work, env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1 and not result.stdout and 'RemoteUrlsUnsupported' in result.stderr, result
+    assert filelist.read_text() == original_list
     info = cli('-l', paths[0]).splitlines()
     assert info[0].startswith('NUM\tFORMAT\tWIDTH') and info[1].split('\t')[1:4] == ['png', '3', '2'], info
     # These headless cases also run on Linux, before the platform-specific

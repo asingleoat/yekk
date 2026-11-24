@@ -1,7 +1,7 @@
 { pkgs, zigObjc, nixpkgsSource, zig }:
 let
   lib = pkgs.lib;
-  packages = (with pkgs; [ libtiff zlib libdeflate libjpeg lerc xz zstd libwebp libjxl libraw brotli libhwy lcms2 gettext zig curl openssl krb5 libssh2 libidn2 libpsl libunistring nghttp2 nghttp3 ngtcp2 libiconvReal ])
+  packages = (with pkgs; [ libtiff zlib libdeflate libjpeg lerc xz zstd libwebp libjxl libraw brotli libhwy lcms2 gettext zig ])
     ++ lib.optional pkgs.stdenv.hostPlatform.isAarch64 pkgs.llvmPackages.openmp;
   sources = pkgs.linkFarm "yekk-macos-library-sources" (map (package: {
     name = package.pname;

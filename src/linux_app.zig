@@ -154,8 +154,6 @@ const Entry = struct {
     failed: bool = false,
     reload: bool = false,
     refreshing: bool = false,
-    remote_selected: bool = false,
-    remote_refresh: bool = false,
     version: u64 = 0,
     stamp: ?Stamp = null,
     prefetch_estimate: ?u64 = null,
@@ -393,7 +391,6 @@ fn parse(state: *State, arguments: input.Arguments, filelist_data: *input.Fileli
     cfg.sheet = common.sheet;
     cfg.wallpaper = common.wallpaper;
     cfg.xinerama_index = common.xinerama_index;
-    cfg.catalog_options.network = common.network();
     cfg.fullscreen = common.fullscreen;
     cfg.borderless = common.borderless;
     cfg.geometry = common.geometry;
@@ -428,7 +425,7 @@ fn usage() void {
         "--browse, --start-at PATH, -f FILELIST (- for stdin), -T THEME, --buttons FILE,\n" ++
         "-j, --output-dir DIR (Shift+L saves the current file list),\n" ++
         "-w, --multiwindow, -^ TITLE, -Y hide pointer, -K CAPTIONS, --draw-exif, --info COMMAND,\n" ++
-        "-m montage, -i index, -t thumbnails, -o FILE, -O output-only FILE, -p preload, -k keep HTTP, --edit,\n" ++
+        "-m montage, -i index, -t thumbnails, -o FILE, -O output-only FILE, -p preload, --edit,\n" ++
         "-Z fit, -. shrink, --fit MODE, --zoom PERCENT|max|fill, --zoom-step PERCENT,\n" ++
         "--keep-zoom-vp, --no-wrap, -D SECONDS (negative: paused), --on-last-slide POLICY,\n" ++
         "-R SECONDS, --watch, -A COMMAND, --action1..9 COMMAND, --config FILE, --keys FILE,\n" ++
@@ -577,12 +574,11 @@ fn index(state: *State) !void {
     state.catalog.validate = catalogValidate;
     try state.catalog.build(state.config.paths[0..state.config.count], state.config.catalog_options);
     if (state.config.listing == .none and state.config.wallpaper == null and !state.config.benchmark and (state.config.sheet.mode != .viewer or state.config.sheet.output_only)) {
-        const directory = if (state.config.sheet.destination == null) try state.catalog.downloads.?.workDir() else ".";
         var opts = state.config.sheet;
         opts.font = state.config.text.font;
         opts.title = state.config.text.title;
         if (opts.mode == .viewer) opts.mode = .montage;
-        try state.gallery.build(&state.catalog, opts, directory, state, SheetBackend);
+        try state.gallery.build(&state.catalog, opts, state, SheetBackend);
     }
     if (state.config.multiwindow and state.config.listing == .none and !state.config.benchmark and state.catalog.count > native.window_limit)
         return error.MultiwindowCapacityExceeded;
@@ -596,7 +592,7 @@ fn index(state: *State) !void {
     native.input.wake();
 }
 fn watched(state: *State, id: usize) void {
-    if (state.removed[id].load(.acquire) or state.catalog.entries[id].downloaded) return;
+    if (state.removed[id].load(.acquire)) return;
     state.lock.lock();
     const interested = state.entries[id].image != null or state.entries[id].failed;
     const before = state.entries[id].stamp;
@@ -614,19 +610,6 @@ fn watched(state: *State, id: usize) void {
         }
     }
 }
-fn watchSelection(state: *State, id: usize) void {
-    if (!state.catalog.entries[id].downloaded) return watched(state, id);
-    if (state.removed[id].load(.acquire)) return;
-    state.lock.lock();
-    defer state.lock.unlock();
-    const entry = &state.entries[id];
-    if (!entry.refreshing and (entry.image != null or entry.failed)) {
-        entry.remote_refresh = true;
-        entry.reload = true;
-        state.reload_pending.store(true, .release);
-        state.changed.notify();
-    }
-}
 fn watchWorker(state: *State) void {
     if (state.context) |context| native.types.bind(context);
     var watch_at: f64 = 0;
@@ -637,7 +620,7 @@ fn watchWorker(state: *State) void {
         if (state.indexed.load(.acquire)) {
             const request = state.getRequest();
             if (request.watch and runtime.now() >= watch_at) {
-                watchSelection(state, request.index);
+                watched(state, request.index);
                 for (0..@min(8, state.catalog.count)) |_| {
                     if (cursor != request.index) watched(state, cursor);
                     cursor = (cursor + 1) % state.catalog.count;
@@ -763,7 +746,7 @@ fn decodeWorker(state: *State) void {
         const selected = state.entries[request.index];
         if (!state.removed[request.index].load(.acquire) and !selected.failed and (selected.image == null or selected.refreshing)) target = request.index else if (selected.image != null and !selected.failed and state.config.prefetch and pressure_selection != request.index and state.presented_revision.load(.acquire) == request.revision) {
             for ([_]?usize{ request.next, request.previous }) |candidate| if (candidate) |id| {
-                if (!state.removed[id].load(.acquire) and !state.entries[id].failed and !state.entries[id].remote_refresh and (state.entries[id].image == null or state.entries[id].refreshing)) {
+                if (!state.removed[id].load(.acquire) and !state.entries[id].failed and (state.entries[id].image == null or state.entries[id].refreshing)) {
                     target = id;
                     break;
                 }
@@ -776,7 +759,7 @@ fn decodeWorker(state: *State) void {
                     foreground_reserve = selected.image.?.pixels.bytes;
                     while (sweep.next(now, available)) |id| {
                         const entry = &state.entries[id];
-                        if (state.removed[id].load(.acquire) or entry.failed or entry.remote_refresh or (entry.image != null and !entry.refreshing)) continue;
+                        if (state.removed[id].load(.acquire) or entry.failed or (entry.image != null and !entry.refreshing)) continue;
                         if (entry.prefetch_estimate) |estimate| if (!cache.prefetchFits(available, estimate, foreground_reserve)) {
                             sweep.blocked(estimate +| foreground_reserve);
                             continue;
@@ -788,7 +771,6 @@ fn decodeWorker(state: *State) void {
                 }
             }
         }
-        const refresh_remote = target == request.index and selected.remote_refresh;
         state.lock.unlock();
         if (target) |id| {
             const foreground = id == request.index;
@@ -816,21 +798,7 @@ fn decodeWorker(state: *State) void {
             };
             const cancel = if (aggressive) &state.distant_cancel else &state.stop;
             if (state.stop.load(.acquire)) continue;
-            const selected_path = state.catalog.entries[id];
-            const path = selected_path.path;
-            if (refresh_remote) {
-                state.lock.lock();
-                const still_selected = state.request.index == id;
-                if (still_selected) state.entries[id].remote_refresh = false;
-                state.lock.unlock();
-                if (!still_selected) continue;
-                state.catalog.downloads.?.refresh(selected_path.savedPath(), path, state.config.catalog_options.network, cancel) catch |err| {
-                    if (cancel.load(.acquire)) return;
-                    output("download {s}: {s}\n", .{ selected_path.savedPath(), @errorName(err) });
-                    failedDecode(state, id, Stamp.read(path));
-                    continue;
-                };
-            }
+            const path = state.catalog.entries[id].path;
             const stamp = Stamp.read(path);
             if (aggressive) {
                 state.lock.lock();
@@ -1221,7 +1189,6 @@ fn hookWorker(state: *State) void {
             state.hook_advance = if (job.kind == .shell and exists and !job.reload and !state.hook_failed) job.index else null;
             if ((job.kind == .edit_image or (job.kind == .shell and job.reload)) and !state.hook_failed) {
                 state.entries[job.index].reload = true;
-                state.entries[job.index].remote_refresh = state.catalog.entries[job.index].downloaded and job.kind == .shell;
                 state.reload_pending.store(true, .release);
             }
             state.lock.unlock();
@@ -1946,17 +1913,10 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
         };
         if (state.lock.tryLock()) {
             if (state.distant_prefetch) |id| if (ui.request.selection_serial != state.request.selection_serial and ui.request.index != id) state.distant_cancel.store(true, .release);
-            const selected = &state.entries[ui.request.index];
-            if (state.catalog.entries[ui.request.index].downloaded) {
-                if (selected.remote_selected and state.config.catalog_options.network.refresh_on_revisit and ui.request.index != state.request.index)
-                    ui.reload_pending = true;
-                if (ui.reload_pending) selected.remote_refresh = true;
-                selected.remote_selected = true;
-            }
             state.request = ui.request;
             state.requested_at = if (state.config.trace) runtime.now() else 0;
             if (ui.reload_pending) {
-                selected.reload = true;
+                state.entries[ui.request.index].reload = true;
                 state.reload_pending.store(true, .release);
                 ui.reload_pending = false;
             }
@@ -2157,7 +2117,6 @@ const Application = struct {
     geometry: native.Geometry,
     persist_geometry: bool,
     filelist_data: input.FilelistBytes,
-    downloads: @import("remote.zig").Session,
 };
 fn configureNativeInput(life: *Life) void {
     const state = life.state;
@@ -2633,10 +2592,9 @@ fn setWallpaper(state: *State, mode: desktop_wallpaper.Mode) !void {
     const height = display.*.h;
     const image = try decode(state.catalog.entries[0].path);
     defer image.destroy();
-    const directory = try state.catalog.downloads.?.workDir();
     var staged: image_output.Temporary = .{};
     defer staged.deinit();
-    try staged.create(directory, .png);
+    try staged.create(image_output.temporaryDirectory(), .png);
 
     if (mode == .tile or mode == .scale) {
         var composed: ?*c.VipsImage = null;
@@ -2704,9 +2662,7 @@ pub fn run(args: []const [*:0]const u8) !void {
     application.reclaimed = 0;
     const state = &application.slots[0].state;
     initialize(state);
-    application.downloads = .{ .transfer = @import("network.zig").download };
-    defer application.downloads.deinit();
-    state.catalog.downloads = &application.downloads;
+    defer contact_sheet.removeTemporarySheets();
     defer native.render.free(&state.result.pixels);
     var theme: input.Theme = .{};
     const arguments = theme.load(args) catch return error.InvalidArguments;

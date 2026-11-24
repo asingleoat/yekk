@@ -3,6 +3,14 @@ const std = @import("std");
 const c = @import("system");
 const runtime = @import("runtime");
 
+pub fn temporaryDirectory() [:0]const u8 {
+    if (c.getenv("TMPDIR")) |env| {
+        const path = std.mem.span(env);
+        if (std.fs.path.isAbsolute(path)) return path;
+    }
+    return "/tmp";
+}
+
 pub const Format = enum {
     png,
     jpeg,

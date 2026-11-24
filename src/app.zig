@@ -31,9 +31,7 @@ const Cached = struct {
     version: u64 = 1,
     image_version: u64 = 0,
     failed_version: u64 = 0,
-    failure: ?anyerror = null,
-    remote_selected: bool = false,
-    remote_refresh: bool = false,
+    failure: ?decoder.Failure = null,
     older: ?usize = null,
     newer: ?usize = null,
     rotation: u2 = 0,
@@ -56,13 +54,12 @@ const Job = struct {
     id: usize = 0,
     version: u64 = 0,
     path: [:0]const u8 = "",
-    refresh_url: ?[:0]const u8 = null,
     edge: u32 = 0,
     workers: usize = 1,
     limits: decoder.Limits = .{},
     elapsed_ms: f64 = 0,
     image: ?*Image = null,
-    failure: ?anyerror = null,
+    failure: ?decoder.Failure = null,
 };
 const Retirement = union(enum) {
     image: *Image,
@@ -326,7 +323,6 @@ const Root = struct {
     control: Control,
     renderer: presentation.Renderer,
     filelist_data: input.FilelistBytes,
-    downloads: @import("remote.zig").Session,
 };
 var root: *Root = undefined;
 var control: *Control = undefined;
@@ -538,7 +534,7 @@ fn released(context: ?*anyopaque) callconv(.c) void {
     s.releaser.busy = false;
     wakeAll();
 }
-fn isMemoryFailure(failure: ?anyerror) bool {
+fn isMemoryFailure(failure: ?decoder.Failure) bool {
     return if (failure) |err| err == error.OutOfMemory else false;
 }
 fn adequate(id: usize, image: *Image) bool {
@@ -830,11 +826,8 @@ fn applyPrepared(wanted: Prepared, revision: u64, surface: n.Ref) bool {
 
 fn select(index: usize, reload: bool) void {
     if (s.closing or index >= s.entries.len) return;
-    const selected = s.entries[index];
-    const id = selected.id;
+    const id = s.entries[index].id;
     const record = &s.cached[id];
-    const refresh_url = selected.downloaded and (reload or (s.options.network.refresh_on_revisit and s.desired != id and record.remote_selected));
-    record.remote_selected = selected.downloaded;
     if (s.desired) |previous| if (position(previous)) |p| {
         if (p != index) s.forward = index > p;
     };
@@ -850,15 +843,9 @@ fn select(index: usize, reload: bool) void {
     s.switch_started = n.now();
     s.memory_retry = null;
     s.memory_retry_id = null;
-    if (isMemoryFailure(s.cached[id].failure)) {
-        s.cached[id].failed_version = 0;
-    }
-    if (reload or refresh_url) {
-        record.version += 1;
-        record.failed_version = 0;
-        record.remote_refresh = record.remote_refresh or refresh_url;
-    }
-    if (s.cached[id].image != null and s.cached[id].image_version == s.cached[id].version) s.cache_hits += 1;
+    if (reload) record.version += 1;
+    if (reload or isMemoryFailure(record.failure)) record.failed_version = 0;
+    if (record.image != null and record.image_version == record.version) s.cache_hits += 1;
     status();
     pump();
 }
@@ -894,13 +881,7 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
     if (!cache.admitDecode(control.active_decodes, control.speculative_decodes, !prefetch) or (prefetch and !control.allow_prefetch)) return false;
     const available = control.decode_worker_budget - control.active_decode_workers;
     if (available == 0) return false;
-    const selected = entry(id) orelse return false;
-    const record = &s.cached[id];
-    if (record.remote_refresh) {
-        if (prefetch) return false;
-        for (s.jobs) |active| if (active.busy and active.id == id and active.refresh_url != null) return false;
-    }
-    const path = selected.path;
+    const path = (entry(id) orelse return false).path;
     // Extension is a scheduling hint only; content still selects the decoder.
     const ext = std.fs.path.extension(path);
     const is_parallel = std.ascii.eqlIgnoreCase(ext, ".tif") or std.ascii.eqlIgnoreCase(ext, ".tiff") or std.ascii.eqlIgnoreCase(ext, ".jxl") or
@@ -916,10 +897,6 @@ fn start(job: *Job, id: usize, intent: DecodeIntent) bool {
         }
     }
     job.* = .{ .owner = s, .busy = true, .prefetch = prefetch, .id = id, .version = s.cached[id].version, .path = path, .workers = workers, .limits = s.limits, .edge = edge };
-    if (record.remote_refresh) {
-        record.remote_refresh = false;
-        job.refresh_url = selected.savedPath();
-    }
     job.aggressive = intent == .aggressive;
     if (job.aggressive) {
         job.selection = s.selection_revision;
@@ -1061,17 +1038,10 @@ fn decodeWorker(context: ?*anyopaque) callconv(.c) void {
     const job: *Job = @ptrCast(@alignCast(context.?));
     s = job.owner;
     const started = if (s.cli.benchmark) n.now() else 0;
-    var before: Stamp = .{};
-    job.image = result: {
-        if (job.refresh_url) |remote_url| root.downloads.refresh(remote_url, job.path, s.options.network, &s.cancel) catch |err| {
-            job.failure = err;
-            break :result null;
-        };
-        before = Stamp.read(job.path) orelse Stamp{};
-        break :result loadJob(job, before) catch |err| failed: {
-            job.failure = err;
-            break :failed null;
-        };
+    const before = Stamp.read(job.path) orelse Stamp{};
+    job.image = loadJob(job, before) catch |err| result: {
+        job.failure = err;
+        break :result null;
     };
     if (job.image) |image| image.async_retirement = true;
     job.stamp = (Stamp.read(job.path) orelse Stamp{});
@@ -1363,8 +1333,6 @@ fn indexWorker(context: ?*anyopaque) callconv(.c) void {
         return;
     };
     s.catalog.probe = catalogInfo;
-    s.catalog.downloads = &root.downloads;
-    s.options.network = s.cli.network();
     s.catalog.validate = catalogValidate;
     s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
         s.index_failure = err;
@@ -1629,25 +1597,15 @@ fn tick(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
         s.last_watch = now;
         s.watch.count = 0;
         if (s.desired) |id| if (entry(id)) |e| {
-            if (e.downloaded) {
-                if (inflight(id) == null) {
-                    const record = &s.cached[id];
-                    record.version += 1;
-                    record.failed_version = 0;
-                    record.remote_refresh = true;
-                    pump();
-                }
-            } else {
-                s.watch.items[0] = .{ .entry = e, .stamp = .{} };
-                s.watch.count = 1;
-            }
+            s.watch.items[0] = .{ .entry = e, .stamp = .{} };
+            s.watch.count = 1;
         };
         var tried: usize = 0;
         while (s.watch.count < s.watch.items.len and tried < s.entries.len) : (tried += 1) {
             if (s.entries.len == 0) break;
             const e = s.entries[s.watch.cursor % s.entries.len];
             s.watch.cursor += 1;
-            if (s.desired == e.id or e.downloaded) continue;
+            if (s.desired == e.id) continue;
             if (s.cached[e.id].image != null) {
                 s.watch.items[s.watch.count] = .{ .entry = e, .stamp = .{} };
                 s.watch.count += 1;
@@ -3351,8 +3309,7 @@ fn buildContactSheet() !void {
     effective.font = s.cli.text.font;
     effective.title = s.cli.text.title;
     if (effective.mode == .viewer) effective.mode = .montage;
-    const temporary = if (effective.destination == null) try root.downloads.workDir() else ".";
-    try s.gallery.build(&s.catalog, effective, temporary, s, SheetBackend);
+    try s.gallery.build(&s.catalog, effective, s, SheetBackend);
 }
 fn setWallpaper() !void {
     var directory_buffer: [4096]u8 = undefined;
@@ -3495,7 +3452,7 @@ const usage =
     \\  -K, --caption-path DIR   --draw-exif           --info COMMAND
     \\  -m, --montage            -i, --index           -t, --thumbnails
     \\  -o, --output FILE        -O, --output-only FILE
-    \\  -p, --preload            -k, --keep-http       --edit
+    \\  -p, --preload            --edit
     \\  -h, --help              -v, --version
     \\  --decode-workers N      CPU decode budget (0: automatic)   --alloc-stats
     \\  --aggressive            Preload the list while memory is available
@@ -3549,10 +3506,9 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
     control = &root.control;
     control.* = .{};
     root.renderer = .{};
-    root.downloads = .{ .transfer = @import("network.zig").download };
     defer if (memory.debug_enabled) memory.allocator().destroy(root) else memory.allocator().rawFree(@as([*]u8, @ptrCast(root))[0..@sizeOf(Root)], .of(Root), @returnAddress());
     defer root.renderer.deinit();
-    defer root.downloads.deinit();
+    defer contact_sheet.removeTemporarySheets();
     s = &root.sessions[0];
     initState(s, 0, .{});
     control.active[0] = true;
@@ -3646,8 +3602,6 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
             return 1;
         };
         s.catalog.probe = catalogInfo;
-        s.catalog.downloads = &root.downloads;
-        s.options.network = s.cli.network();
         s.catalog.validate = catalogValidate;
         s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
             n.output(2, @errorName(err));

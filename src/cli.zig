@@ -42,9 +42,6 @@ pub const Options = struct {
     force_aliasing: bool = false,
     edit: bool = false,
     background: ?union(enum) { default, checks, color: [3]u8 } = null,
-    keep_http: bool = false,
-    insecure: bool = false,
-    refresh_http: bool = false,
     scroll_step: ?f64 = null,
     reload_seconds: ?f64 = null,
 
@@ -232,12 +229,6 @@ pub const Options = struct {
             self.primary_only = true;
         } else if (std.mem.eql(u8, name, "no-fehbg")) {
             // Native desktop settings persist the selected image.
-        } else if (std.mem.eql(u8, name, "keep-http")) {
-            self.keep_http = true;
-        } else if (std.mem.eql(u8, name, "no-conversion-cache")) {
-            self.refresh_http = true;
-        } else if (std.mem.eql(u8, name, "insecure")) {
-            self.insecure = true;
         } else if (std.mem.eql(u8, name, "start-at")) {
             listing.start_at = value;
         } else if (std.mem.eql(u8, name, "on-last-slide")) {
@@ -301,9 +292,6 @@ pub const Options = struct {
             .index, .fullindex => .index,
             .thumbnails => .thumbnails,
         };
-    }
-    pub fn network(self: *const Options) @import("remote.zig").Options {
-        return .{ .keep_in = if (self.keep_http) self.output_dir orelse "." else null, .insecure = self.insecure, .refresh_on_revisit = self.refresh_http };
     }
     pub fn apply(self: *const Options, settings: *actions.Settings) void {
         if (self.fit) |fit| settings.fit = if (self.auto_zoom and !self.scale_down and !(self.fullscreen and self.zoom == null)) switch (fit) {

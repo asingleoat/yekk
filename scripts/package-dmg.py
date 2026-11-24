@@ -93,11 +93,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-dmg-') as temporary:
             if resolved == original.resolve(): continue
             if resolved not in copied:
                 name = Path(dep).name
-                if name in names:
-                    # Preserve both implementations when they share an install name.
-                    suffix = hashlib.sha256(os.fsencode(resolved)).hexdigest()[:12]
-                    name = f'{Path(name).stem}-{suffix}.dylib'
-                    if name in names: raise RuntimeError(f'library name collision: {name}')
+                if name in names and names[name] != resolved: raise RuntimeError(f'library name collision: {name}')
                 names[name] = resolved; copied[resolved] = libraries / name
                 shutil.copy2(resolved, copied[resolved]); copied[resolved].chmod(0o755)
                 queue.append((resolved, copied[resolved]))

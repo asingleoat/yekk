@@ -131,7 +131,7 @@ pub const Work = struct {
         self.path_count = 0;
         if (job.options.info_visible and hooks.needsManifest(job.options.info orelse "")) {
             self.path_count = if (order) |ids| ids.len else entries.len;
-            for (self.paths[0..self.path_count], 0..) |*path, i| path.* = entries[if (order) |ids| ids[i] else i].savedPath();
+            for (self.paths[0..self.path_count], 0..) |*path, i| path.* = entries[if (order) |ids| ids[i] else i].path;
         }
         self.cancelled.store(false, .release);
         self.phase.store(.pending, .release);

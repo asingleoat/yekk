@@ -52,18 +52,6 @@ selection. For `--start-at`, use the same path spelling as the input. If
 there is no exact match, Yekk starts at the first entry with the same
 filename.
 
-### URLs
-
-Supply an HTTP or HTTPS URL in place of a filename. Downloads run on an indexing
-worker. The viewer removes temporary downloads at exit. `-k` or `--keep-http`
-keeps the downloaded files. Use `-j DIR` to choose where to keep them. Exported
-file lists retain the URL so that they can reopen it. `--insecure` disables
-TLS certificate and host verification.
-
-Press **r** to download the current URL again. `--reload SECONDS` periodically
-downloads the current URL. Use `--no-conversion-cache` to download a URL
-again when you return to it after viewing another image.
-
 ### Window size and zoom
 
 The **viewport** is the image-display area inside the window.
@@ -427,6 +415,10 @@ action_2 = [Discard]mv -n %F "$HOME/Pictures/discard/"
 ```
 
 ## Differences and unsupported features
+
+Yekk opens local images. HTTP and HTTPS URLs are unsupported on the command
+line and in file lists. The feh download options `--keep-http`, `--insecure`,
+and `--no-conversion-cache` are also unsupported.
 
 Yekk adds these options:
 
