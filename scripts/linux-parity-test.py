@@ -168,6 +168,16 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
     carriage.symlink_to(root / "tests/fixtures/alpha.content")
     check("CRLF-ambiguous path preserves original filelist", ["-f", listing, "--print-filelist", carriage], expected=1)
     assert listing.read_text() == f"{first}\n"
+    duplicate_paths = [folder / name / "same.tif" for name in ("a", "b")]
+    for source, duplicate in zip((first, second), duplicate_paths):
+        duplicate.parent.mkdir()
+        shutil.copyfile(source, duplicate)
+    relative_first = os.path.relpath(duplicate_paths[0], root)
+    relative_second = os.path.relpath(duplicate_paths[1], root)
+    for start, selected in [(relative_second, "1"), (str(duplicate_paths[1]), "0")]:
+        result = check("start-at exact spelling then basename fallback " + selected,
+                       ["--start-at", start, "--trace-events", "--smoke-test", relative_first, relative_second], gui=True)
+        assert views(result)[0]["id"] == selected, result.stdout
     result = check("standalone start-at browses siblings", ["--start-at", second, "--print-filelist"])
     assert str(first) in result.stdout and str(second) in result.stdout
     result = check("nonwrapping navigation", ["--no-wrap", "--trace-events", "--test-keys", "Left,Right,Right", first, second], gui=True)
@@ -310,7 +320,7 @@ with tempfile.TemporaryDirectory(prefix="yekk-linux-parity-") as temporary:
         viewport, width, height, reported_zoom, origin = coordinates.read_text().splitlines()
         vw, vh = map(int, viewport.split(','))
         x, y = map(int, origin.split(','))
-        scale = float(reported_zoom) / 100
+        scale = float(reported_zoom)
         assert abs(x - ((vw - int(width) * scale) / 2 + pan[0])) <= 0.5, name
         assert abs(y - ((vh - int(height) * scale) / 2 + pan[1])) <= 0.5, name
     hook_output = folder / "hook"

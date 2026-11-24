@@ -283,12 +283,13 @@ fn output(comptime format: []const u8, args: anytype) void {
     var buffer: [8192]u8 = undefined;
     runtime.output(2, std.fmt.bufPrint(&buffer, format, args) catch "diagnostic too long\n");
 }
-fn parse(state: *State, args: []const [*:0]const u8) !bool {
+fn parse(state: *State, arguments: input.Arguments) !bool {
     const cfg = &state.config;
     var common: @import("cli.zig").Options = .{};
     var config_path: ?[:0]const u8 = null;
     var keys: ?[:0]const u8 = null;
-    var scan: options.Iterator = .{ .args = args };
+    var buttons: ?[:0]const u8 = null;
+    var scan = arguments;
     while (try scan.next()) |item| {
         if (item.positional) continue;
         if (std.mem.eql(u8, item.name, "alloc-stats") or std.mem.eql(u8, item.name, "allocation-stats")) memory.report = true;
@@ -302,10 +303,11 @@ fn parse(state: *State, args: []const [*:0]const u8) !bool {
         }
         if (std.mem.eql(u8, item.name, "config")) config_path = item.value;
         if (std.mem.eql(u8, item.name, "keys")) keys = item.value;
+        if (std.mem.eql(u8, item.name, "buttons")) buttons = item.value;
     }
-    try input.loadSettings(&cfg.settings, config_path, keys);
+    try input.loadSettings(&cfg.settings, config_path, keys, buttons);
     state.request.view.mode = cfg.settings.fit;
-    var it: options.Iterator = .{ .args = args };
+    var it = arguments;
     while (try it.next()) |item| {
         if (item.positional) {
             if (std.mem.eql(u8, item.name, "-")) {
@@ -369,11 +371,12 @@ fn parse(state: *State, args: []const [*:0]const u8) !bool {
 fn usage() void {
     runtime.output(1, "usage: yekk [OPTIONS] [IMAGE|DIRECTORY...]\n" ++
         "-F fullscreen, -g GEOMETRY, -x borderless, -r recursive, -n reverse, -z shuffle,\n" ++
-        "-S SORT, --version-sort, --browse, --start-at PATH, -f FILELIST (- for stdin),\n" ++
+        "-S SORT, --version-sort, --min-dimension WxH, --max-dimension WxH,\n" ++
+        "--browse, --start-at PATH, -f FILELIST (- for stdin), -T THEME, --buttons FILE,\n" ++
         "-Z fit, -. shrink, --fit MODE, --zoom PERCENT|max|fill, --zoom-step PERCENT,\n" ++
         "--keep-zoom-vp, --no-wrap, -D SECONDS (negative: paused), --on-last-slide POLICY,\n" ++
         "-R SECONDS, --watch, -A COMMAND, --action1..9 COMMAND, --config FILE, --keys FILE,\n" ++
-        "-l metadata list, --print-filelist, --formats, --software, --decode-workers N,\n" ++
+        "-l list, -L FORMAT, -U loadable, -u unloadable, --print-filelist, --formats,\n" ++
         "--aggressive (preload the list), --no-prefetch, --benchmark, --alloc-stats.\n" ++
         "Keys follow the shared feh action map.\n");
 }
@@ -416,8 +419,24 @@ fn reclaim(state: *State, protected: usize) void {
         }
     }
 }
+fn catalogInfo(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) ?catalog.Info {
+    var metadata: native.Metadata = undefined;
+    if (native.image.probeWithCancel(path.ptr, &metadata, cancel) != 0) return null;
+    return catalog.Info.init(metadata.width, metadata.height, std.mem.sliceTo(&metadata.format, 0), metadata.alpha);
+}
+
+fn catalogLoadable(path: [:0]const u8) anyerror!bool {
+    const image = decode(path) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => false,
+    };
+    image.destroy();
+    return true;
+}
+
 fn index(state: *State) !void {
     state.catalog.cancel = &state.stop;
+    state.catalog.probe = catalogInfo;
     try state.catalog.build(state.config.paths[0..state.config.count], state.config.catalog_options);
     if (state.catalog.selected) |selected| {
         for (state.catalog.entries[0..state.catalog.count], 0..) |entry, i| {
@@ -1119,6 +1138,7 @@ const Ui = struct {
     initialized: bool = false,
     display_dirty: bool = false,
     ignore_click: bool = false,
+    mouse_drag: ?actions.MouseAction = null,
     menu: menu.Menu = .{},
     open_test_requested: bool = false,
     request: Request = .{},
@@ -1151,10 +1171,26 @@ const Ui = struct {
         self.* = .{ .initialized = true, .request = state.request, .started = runtime.now(), .test_keys = std.mem.tokenizeScalar(u8, state.config.test_keys orelse "", ',') };
     }
 };
+fn portableKeypad(key: c_int) c_int {
+    const c = native.types.c;
+    return switch (key) {
+        c.SDLK_KP_0 => actions.keypad_zero,
+        c.SDLK_KP_1...c.SDLK_KP_9 => actions.keypad_zero + @as(u16, @intCast(key - c.SDLK_KP_1)) + 1,
+        c.SDLK_KP_PERIOD => actions.keypad_decimal,
+        c.SDLK_KP_ENTER => actions.keypad_enter,
+        c.SDLK_KP_PLUS => actions.keypad_plus,
+        c.SDLK_KP_MINUS => actions.keypad_minus,
+        c.SDLK_KP_MULTIPLY => actions.keypad_multiply,
+        c.SDLK_KP_DIVIDE => actions.keypad_divide,
+        c.SDLK_KP_EQUALS => actions.keypad_equal,
+        else => if (key <= 0xffff) key else 0,
+    };
+}
 const UiEffect = enum { idle, close, quit_all };
 fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiEffect {
     _ = state.retirement.push(&ui.retiring);
     var event = incoming;
+    if (event.kind == 2) event.key = portableKeypad(event.key);
     if (state.config.test_keys != null and event.kind == 2) ui.test_key_pending = false;
     if (state.index_failed.load(.acquire)) {
         if (state.config.smoke or state.config.stress > 0) return error.IndexFailed;
@@ -1214,7 +1250,7 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
             }
         }
         var menu_action: ?actions.Action = null;
-        if (event.kind == 6 and event.key == 3) {
+        if (!state.controller.settings.mouse_configured and event.kind == 6 and event.key == 3) {
             state.controller.held_advance.cancel();
             ui.menu.open = !ui.menu.open;
             ui.menu.x = @intFromFloat(event.x);
@@ -1251,6 +1287,46 @@ fn sessionTick(state: *State, life: *Life, ui: *Ui, incoming: native.Event) !UiE
                 effect.changed = true;
                 event.kind = 0;
             } else if (event.kind == 4 or event.kind == 9) event.kind = 0;
+        }
+        if (state.controller.settings.mouse_configured and !ui.menu.open) {
+            if (event.kind == 6) {
+                state.controller.held_advance.cancel();
+                const button = std.math.cast(u8, if (event.key > 3) event.key + 4 else event.key) orelse 0;
+                const binding = state.controller.settings.lookupButton(button, modifiers(event.modifiers));
+                ui.mouse_drag = null;
+                if (binding) |bound| switch (bound) {
+                    .pan, .zoom => ui.mouse_drag = bound,
+                    .action => |action| {
+                        menu_action = action;
+                        ui.menu.x = @intFromFloat(event.x);
+                        ui.menu.y = @intFromFloat(event.y);
+                    },
+                };
+                event.kind = 0;
+            } else if (event.wheel_button != 0) {
+                if (state.controller.settings.lookupButton(event.wheel_button, modifiers(event.modifiers))) |bound| {
+                    if (bound == .action) menu_action = bound.action;
+                }
+                event.kind = 0;
+            } else if (event.drag_button != 0) {
+                event.kind = 0;
+                if (ui.mouse_drag) |bound| switch (bound) {
+                    .pan => {
+                        event.kind = 4;
+                        event.x = event.drag_x;
+                        event.y = event.drag_y;
+                    },
+                    .zoom => {
+                        event.kind = 9;
+                        event.y = event.drag_zoom;
+                    },
+                    .action => unreachable,
+                };
+            } else if (event.kind == 8 or event.kind == 12) {
+                ui.mouse_drag = null;
+                ui.ignore_click = false;
+                event.kind = 0;
+            }
         }
         if (menu_action) |action| {
             effect = state.controller.apply(action, &ui.request, state.catalog.entries[0..state.catalog.count], runtime.now());
@@ -2021,18 +2097,9 @@ fn windowTest(application: *Application) !void {
 fn headless(state: *State) !void {
     try index(state);
     if (state.config.listing != .none) {
-        if (state.config.listing == .metadata) runtime.output(1, "NUM\tFORMAT\tWIDTH\tHEIGHT\tPIXELS\tSIZE\tFILENAME\n");
-        for (state.catalog.entries[0..state.catalog.count], 0..) |entry, position| {
-            if (state.config.listing == .metadata) {
-                var metadata: native.Metadata = undefined;
-                if (native.image.probe(entry.path.ptr, &metadata) != 0) return error.MetadataFailed;
-                var line: [512]u8 = undefined;
-                runtime.output(1, try std.fmt.bufPrint(&line, "{d}\t{s}\t{d}\t{d}\t{d}\t{d}\t", .{ position + 1, std.mem.sliceTo(&metadata.format, 0), metadata.width, metadata.height, @as(u64, metadata.width) * metadata.height, entry.bytes }));
-            }
-            runtime.output(1, entry.path);
-            runtime.output(1, "\n");
-        }
+        const matched = try @import("listings.zig").run(state.config.listing, &state.catalog, catalogInfo, catalogLoadable, state.config.settings.hooks[0]);
         try saveFilelist(state);
+        if (!matched) return error.ClassificationMismatch;
         return;
     }
     if (state.catalog.count != 1) return error.BenchmarkRequiresOneImage;
@@ -2065,12 +2132,14 @@ pub fn run(args: []const [*:0]const u8) !void {
     const state = &application.slots[0].state;
     initialize(state);
     defer native.render.free(&state.result.pixels);
-    const proceed = parse(state, args) catch |err| {
+    var theme: input.Theme = .{};
+    const arguments = theme.load(args) catch return error.InvalidArguments;
+    const proceed = parse(state, arguments) catch |err| {
         output("arguments: {s}\n", .{@errorName(err)});
         return error.InvalidArguments;
     };
     if (!proceed) return;
-    if (state.config.listing == .paths) return headless(state);
+    if (state.config.listing == .paths and !state.config.catalog_options.needsInfo()) return headless(state);
     configureController(state);
     if (native.image.init(state.config.workers) != 0) return error.DecoderInitFailed;
     defer native.shutdown();

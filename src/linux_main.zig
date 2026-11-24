@@ -4,7 +4,7 @@ const runtime = @import("runtime");
 pub export fn main(argc: c_int, argv: [*][*:0]const u8) c_int {
     var status: c_int = 0;
     app.run(argv[1..@intCast(argc)]) catch |err| {
-        if (err != error.InvalidArguments) {
+        if (err != error.InvalidArguments and err != error.ClassificationMismatch) {
             runtime.output(2, @errorName(err));
             runtime.output(2, "\n");
         }

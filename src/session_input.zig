@@ -5,6 +5,112 @@ const runtime = @import("runtime");
 const files = runtime.files;
 const actions = @import("actions.zig");
 const catalog = @import("catalog.zig");
+const options = @import("options.zig");
+
+pub const Arguments = struct {
+    theme: options.Iterator,
+    cli: options.Iterator,
+
+    pub fn next(self: *Arguments) !?options.Item {
+        while (true) {
+            const item = (try self.theme.next()) orelse (try self.cli.next()) orelse return null;
+            if (item.positional or !std.mem.eql(u8, item.name, "theme")) return item;
+        }
+    }
+};
+
+/// The caller owns this storage until the viewer exits. Positional arguments
+/// and option values from the theme remain valid for the indexing worker.
+pub const Theme = struct {
+    data: [65537]u8 = undefined,
+    args: [512][*:0]const u8 = undefined,
+    count: usize = 0,
+
+    pub fn load(self: *Theme, cli: []const [*:0]const u8) !Arguments {
+        var chosen: ?[]const u8 = null;
+        var scan: options.Iterator = .{ .args = cli };
+        while (try scan.next()) |item| {
+            if (!item.positional and std.mem.eql(u8, item.name, "theme")) chosen = item.value;
+        }
+        if (chosen) |name| {
+            var path: [4096]u8 = undefined;
+            var bytes: [65537]u8 = undefined;
+            const config = if (c.getenv("XDG_CONFIG_HOME")) |value|
+                try std.fmt.bufPrintSentinel(&path, "{s}/feh/themes", .{std.mem.span(value)}, 0)
+            else if (c.getenv("HOME")) |value|
+                try std.fmt.bufPrintSentinel(&path, "{s}/.config/feh/themes", .{std.mem.span(value)}, 0)
+            else
+                "/etc/feh/themes";
+            const contents = (try read(config, &bytes, true)) orelse
+                (try read("/etc/feh/themes", &bytes, true)) orelse return error.ThemeNotFound;
+            try self.parse(contents, name);
+        }
+        return .{ .theme = .{ .args = self.args[0..self.count] }, .cli = .{ .args = cli } };
+    }
+
+    fn parse(self: *Theme, contents: []const u8, name: []const u8) !void {
+        if (name.len == 0 or std.mem.indexOfScalar(u8, contents, 0) != null) return error.InvalidTheme;
+        var lines = std.mem.splitScalar(u8, contents, '\n');
+        var continuing = false;
+        var selected = false;
+        var length: usize = 0;
+        while (lines.next()) |raw| {
+            var line = std.mem.trim(u8, raw, " \t\r");
+            if (!continuing) {
+                if (line.len == 0 or line[0] == '#') continue;
+                const end = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
+                selected = std.mem.eql(u8, line[0..end], name);
+                line = std.mem.trimStart(u8, line[end..], " \t");
+            }
+            continuing = std.mem.endsWith(u8, line, "\\");
+            if (continuing) line = line[0 .. line.len - 1];
+            if (!selected) continue;
+            if (length + line.len + 1 >= self.data.len) return error.InputTooLarge;
+            @memcpy(self.data[length..][0..line.len], line);
+            length += line.len;
+            if (!continuing) {
+                try self.tokenize(length);
+                return;
+            }
+            self.data[length] = ' ';
+            length += 1;
+        }
+        return if (selected) error.InvalidTheme else error.ThemeNotFound;
+    }
+
+    fn tokenize(self: *Theme, length: usize) !void {
+        var read_index: usize = 0;
+        var write_index: usize = 0;
+        while (read_index < length) {
+            if (std.ascii.isWhitespace(self.data[read_index])) {
+                read_index += 1;
+                continue;
+            }
+            if (self.count == self.args.len) return error.TooManyThemeOptions;
+            const start = write_index;
+            var quote: ?u8 = null;
+            while (read_index < length) {
+                const ch = self.data[read_index];
+                read_index += 1;
+                if (quote == ch) {
+                    quote = null;
+                } else if (quote == null and (ch == '\'' or ch == '"')) {
+                    quote = ch;
+                } else if (quote == null and std.ascii.isWhitespace(ch)) {
+                    break;
+                } else {
+                    self.data[write_index] = ch;
+                    write_index += 1;
+                }
+            }
+            if (quote != null) return error.InvalidTheme;
+            self.data[write_index] = 0;
+            self.args[self.count] = self.data[start..write_index :0].ptr;
+            self.count += 1;
+            write_index += 1;
+        }
+    }
+};
 
 pub fn read(path: [:0]const u8, buffer: []u8, missing_ok: bool) !?[]u8 {
     const fd = c.open(path.ptr, c.O_RDONLY | c.O_NONBLOCK | c.O_CLOEXEC);
@@ -26,7 +132,7 @@ pub fn read(path: [:0]const u8, buffer: []u8, missing_ok: bool) !?[]u8 {
     }
     return error.InputTooLarge;
 }
-pub fn loadSettings(settings: *actions.Settings, config: ?[:0]const u8, keys: ?[:0]const u8) !void {
+pub fn loadSettings(settings: *actions.Settings, config: ?[:0]const u8, keys: ?[:0]const u8, buttons: ?[:0]const u8) !void {
     settings.* = .init();
 
     var path: [4096]u8 = undefined;
@@ -56,6 +162,18 @@ pub fn loadSettings(settings: *actions.Settings, config: ?[:0]const u8, keys: ?[
         if (settings.error_line != 0) {
             inputDiagnostic("keys", full, settings.error_line);
             return error.InvalidKeys;
+        }
+    }
+    const buttons_path = buttons orelse try defaultPath(&path, "buttons");
+    if (buttons_path) |full| {
+        const bytes = read(full, &data, buttons == null) catch |err| {
+            inputDiagnostic("buttons", full, 0);
+            return err;
+        };
+        if (bytes) |text| settings.parseButtons(text);
+        if (settings.error_line != 0) {
+            inputDiagnostic("buttons", full, settings.error_line);
+            return error.InvalidButtons;
         }
     }
 }

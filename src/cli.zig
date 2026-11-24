@@ -5,7 +5,7 @@ const core = @import("core.zig");
 const hooks = @import("hooks.zig");
 const catalog = @import("catalog.zig");
 const options = @import("options.zig");
-pub const Listing = enum { none, paths, metadata };
+pub const Listing = union(enum) { none, paths, metadata, custom: [:0]const u8, loadable, unloadable };
 pub const Slideshow = struct { seconds: f64, paused: bool };
 pub const Options = struct {
     config: ?[:0]const u8 = null,
@@ -24,6 +24,7 @@ pub const Options = struct {
     draw_filename: bool = false,
     default_directory: bool = false,
     keys: ?[:0]const u8 = null,
+    buttons: ?[:0]const u8 = null,
     hook_test: bool = false,
     filelist: ?[:0]const u8 = null,
     reload_seconds: ?f64 = null,
@@ -82,8 +83,19 @@ pub const Options = struct {
             self.keep_view = true;
         } else if (std.mem.eql(u8, name, "list")) {
             self.listing = .metadata;
+            listing.report_paths = true;
+        } else if (std.mem.eql(u8, name, "customlist")) {
+            self.listing = .{ .custom = value };
+            listing.report_paths = true;
+        } else if (std.mem.eql(u8, name, "loadable")) {
+            self.listing = .loadable;
+            listing.report_paths = true;
+        } else if (std.mem.eql(u8, name, "unloadable")) {
+            self.listing = .unloadable;
+            listing.report_paths = true;
         } else if (std.mem.eql(u8, name, "print-filelist")) {
             self.listing = .paths;
+            listing.report_paths = false;
         } else if (std.mem.eql(u8, name, "draw-actions")) {
             self.draw_actions = true;
         } else if (std.mem.eql(u8, name, "draw-filename")) {
@@ -98,6 +110,8 @@ pub const Options = struct {
             self.config = value;
         } else if (std.mem.eql(u8, name, "keys")) {
             self.keys = value;
+        } else if (std.mem.eql(u8, name, "buttons")) {
+            self.buttons = value;
         } else if (std.mem.eql(u8, name, "filelist")) {
             self.filelist = value;
         } else if (std.mem.eql(u8, name, "start-at")) {
@@ -111,6 +125,10 @@ pub const Options = struct {
             self.zoom = null;
         } else if (std.mem.eql(u8, name, "sort")) {
             listing.sort = std.meta.stringToEnum(catalog.Sort, value) orelse return error.InvalidSortMode;
+        } else if (std.mem.eql(u8, name, "min-dimension")) {
+            listing.minimum = try catalog.Dimensions.parse(value);
+        } else if (std.mem.eql(u8, name, "max-dimension")) {
+            listing.maximum = try catalog.Dimensions.parse(value);
         } else if (std.mem.eql(u8, name, "version-sort")) {
             listing.version_sort = true;
         } else if (std.mem.eql(u8, name, "slideshow") or std.mem.eql(u8, name, "slideshow-delay")) {
@@ -185,7 +203,7 @@ test "CLI overrides preserve option order, inheritance and explicit disabling" {
     try std.testing.expectError(error.InvalidZoom, parsed.parse(.{ .name = "zoom", .value = "nan" }, &listing));
     try std.testing.expect(try parsed.parse(.{ .name = "list" }, &listing));
     try std.testing.expect(try parsed.parse(.{ .name = "print-filelist" }, &listing));
-    try std.testing.expectEqual(Listing.paths, parsed.listing);
+    try std.testing.expect(parsed.listing == .paths);
     try settings.hooks[0].set("echo keep");
     try settings.hooks[1].set("echo inherited");
     try std.testing.expect(try parsed.parse(.{ .name = "action", .value = "" }, &listing));

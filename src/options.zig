@@ -28,6 +28,10 @@ pub const Iterator = struct {
                 'd' => "draw-filename",
                 'R' => "reload",
                 'l' => "list",
+                'L' => "customlist",
+                'U' => "loadable",
+                'u' => "unloadable",
+                'T' => "theme",
                 'f' => "filelist",
                 '|' => "start-at",
                 else => return error.UnknownOption,
@@ -67,7 +71,7 @@ pub const Iterator = struct {
 };
 fn needsValue(name: []const u8) bool {
     if (std.mem.eql(u8, name, "action") or (name.len == 7 and std.mem.startsWith(u8, name, "action") and std.ascii.isDigit(name[6]))) return true;
-    inline for (.{ "sort", "fit", "slideshow", "slideshow-delay", "snapshot", "config", "zoom", "zoom-step", "on-last-slide", "reload", "filelist", "start-at", "keys", "stress-test", "geometry", "decode-workers", "test-keys", "test-open", "window-test" }) |value| if (std.mem.eql(u8, name, value)) return true;
+    inline for (.{ "sort", "customlist", "min-dimension", "max-dimension", "theme", "buttons", "fit", "slideshow", "slideshow-delay", "snapshot", "config", "zoom", "zoom-step", "on-last-slide", "reload", "filelist", "start-at", "keys", "stress-test", "geometry", "decode-workers", "test-keys", "test-open", "window-test" }) |value| if (std.mem.eql(u8, name, value)) return true;
     return false;
 }
 test "feh short bundles, attached values, equals and literal file arguments" {

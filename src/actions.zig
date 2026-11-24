@@ -82,6 +82,7 @@ pub const defaults = [_]Binding{
     .{ .key = 0xF729, .action = .first },                              .{ .key = 0xF72B, .action = .last },
     .{ .key = 0xF72C, .action = .jump_forward },                       .{ .key = 0xF72D, .action = .jump_back },
     .{ .key = 0xF700, .action = .zoom_in },                            .{ .key = 0xF701, .action = .zoom_out },
+    .{ .key = keypad_plus, .action = .zoom_in },                       .{ .key = keypad_minus, .action = .zoom_out },
     .{ .key = '*', .action = .actual },                                .{ .key = '/', .action = .fit },
     .{ .key = '!', .action = .fill },                                  .{ .key = 'f', .action = .fullscreen },
     .{ .key = 'r', .action = .reload },                                .{ .key = 'i', .action = .info },
@@ -105,9 +106,35 @@ pub const defaults = [_]Binding{
     .{ .key = '9', .action = .action_9 },                              .{ .key = 'w', .modifiers = command, .action = .close },
     .{ .key = 'q', .modifiers = command, .action = .quit },            .{ .key = 'o', .modifiers = command, .action = .open },
 };
+pub const MouseAction = union(enum) {
+    pan,
+    zoom,
+    action: Action,
+};
+const MouseBinding = struct { button: u8, modifiers: usize = 0, action: MouseAction };
+const mouse_defaults = [_]MouseBinding{
+    .{ .button = 1, .action = .pan },
+    .{ .button = 2, .action = .zoom },
+    .{ .button = 3, .action = .{ .action = .menu } },
+    .{ .button = 4, .action = .{ .action = .previous } },
+    .{ .button = 5, .action = .{ .action = .next } },
+};
+pub const keypad_zero: u16 = 0xE100;
+pub const keypad_decimal = keypad_zero + 10;
+pub const keypad_enter = keypad_zero + 11;
+pub const keypad_plus = keypad_zero + 12;
+pub const keypad_minus = keypad_zero + 13;
+pub const keypad_multiply = keypad_zero + 14;
+pub const keypad_divide = keypad_zero + 15;
+pub const keypad_equal = keypad_zero + 16;
+const keypad_printable = "0123456789.\r+-*/=";
+
 pub const Settings = struct {
     bindings: [128]Binding = undefined,
     binding_count: usize = 0,
+    mouse: [128]MouseBinding = undefined,
+    mouse_count: usize = 0,
+    mouse_configured: bool = false,
     wrap: bool = true,
     hooks: [10]hooks.Command = @splat(.{}),
     zoom_step: f64 = 1.25,
@@ -125,10 +152,19 @@ pub const Settings = struct {
         var self: Settings = .{};
         @memcpy(self.bindings[0..defaults.len], &defaults);
         self.binding_count = defaults.len;
+        @memcpy(self.mouse[0..mouse_defaults.len], &mouse_defaults);
+        self.mouse_count = mouse_defaults.len;
         if (@import("builtin").os.tag == .linux) self.parse("bind Ctrl+o = open\nbind Ctrl+Shift+o = open\n");
         return self;
     }
     pub fn lookup(self: *const Settings, key: u16, modifiers: usize) ?Action {
+        if (self.lookupKey(key, modifiers)) |action| return action;
+        if (key == keypad_plus or key == keypad_minus) return null;
+        if (key >= keypad_zero and key - keypad_zero < keypad_printable.len) return self.lookupKey(keypad_printable[key - keypad_zero], modifiers);
+        return null;
+    }
+
+    fn lookupKey(self: *const Settings, key: u16, modifiers: usize) ?Action {
         const lower: u16 = if (key <= 127) std.ascii.toLower(@intCast(key)) else key;
         for (self.bindings[0..self.binding_count]) |b| {
             const relevant = command | option | control | (if (b.modifiers & shift != 0 or (lower >= 'a' and lower <= 'z')) shift else @as(usize, 0));
@@ -181,6 +217,61 @@ pub const Settings = struct {
             }
         }
     }
+    pub fn lookupButton(self: *const Settings, button: u8, modifiers: usize) ?MouseAction {
+        for (self.mouse[0..self.mouse_count]) |binding| {
+            if (binding.button == button and binding.modifiers == modifiers & (command | option | control | shift)) return binding.action;
+        }
+        return null;
+    }
+
+    pub fn parseButtons(self: *Settings, bytes: []const u8) void {
+        self.mouse_configured = true;
+        var lines = std.mem.splitScalar(u8, bytes, '\n');
+        var number: usize = 0;
+        while (lines.next()) |line| {
+            number += 1;
+            self.parseButtonLine(line) catch {
+                if (self.error_line == 0) self.error_line = number;
+            };
+        }
+    }
+
+    fn parseButtonLine(self: *Settings, line: []const u8) !void {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        const name = words.next() orelse return;
+        if (name[0] == '#') return;
+        const action: MouseAction = if (std.mem.eql(u8, name, "pan"))
+            .pan
+        else if (std.mem.eql(u8, name, "zoom"))
+            .zoom
+        else
+            .{ .action = actionName(name) orelse return error.UnknownAction };
+        var count: usize = 0;
+        for (self.mouse[0..self.mouse_count]) |binding| {
+            if (std.meta.eql(binding.action, action)) continue;
+            self.mouse[count] = binding;
+            count += 1;
+        }
+        self.mouse_count = count;
+        while (words.next()) |word| {
+            if (word[0] == '#') break;
+            const parsed = parseModifiers(word);
+            const button = std.fmt.parseInt(u8, parsed.name, 10) catch return error.InvalidButton;
+            if (button == 0) return error.InvalidButton;
+            const binding: MouseBinding = .{ .button = button, .modifiers = parsed.modifiers, .action = action };
+            for (self.mouse[0..self.mouse_count]) |*previous| {
+                if (previous.button == button and previous.modifiers == parsed.modifiers) {
+                    previous.* = binding;
+                    break;
+                }
+            } else {
+                if (self.mouse_count == self.mouse.len) return error.TooManyBindings;
+                self.mouse[self.mouse_count] = binding;
+                self.mouse_count += 1;
+            }
+        }
+    }
+
     fn bind(self: *Settings, binding: Binding) !void {
         for (self.bindings[0..self.binding_count]) |*b| if (b.key == binding.key and b.modifiers == binding.modifiers) {
             b.* = binding;
@@ -212,12 +303,12 @@ pub const Settings = struct {
         }
     }
 };
-pub fn parseKey(text: []const u8) !Binding {
+fn parseModifiers(text: []const u8) struct { name: []const u8, modifiers: usize } {
     var name = text;
-    var b: Binding = .{ .key = 0, .action = .help };
+    var modifiers: usize = 0;
     while (true) {
         if (name.len >= 2 and name[1] == '-' and std.mem.indexOfScalar(u8, "CS14", name[0]) != null) {
-            b.modifiers |= switch (name[0]) {
+            modifiers |= switch (name[0]) {
                 'C' => control,
                 'S' => shift,
                 '1' => option,
@@ -225,18 +316,49 @@ pub fn parseKey(text: []const u8) !Binding {
             };
             name = name[2..];
         } else if (std.mem.startsWith(u8, name, "Cmd+")) {
-            b.modifiers |= command;
+            modifiers |= command;
             name = name[4..];
         } else if (std.mem.startsWith(u8, name, "Shift+")) {
-            b.modifiers |= shift;
+            modifiers |= shift;
             name = name[6..];
         } else if (std.mem.startsWith(u8, name, "Alt+")) {
-            b.modifiers |= option;
+            modifiers |= option;
             name = name[4..];
         } else if (std.mem.startsWith(u8, name, "Ctrl+")) {
-            b.modifiers |= control;
+            modifiers |= control;
             name = name[5..];
         } else break;
+    }
+    return .{ .name = name, .modifiers = modifiers };
+}
+
+pub fn parseKey(text: []const u8) !Binding {
+    const parsed = parseModifiers(text);
+    const name = parsed.name;
+    var b: Binding = .{ .key = 0, .action = .help, .modifiers = parsed.modifiers };
+    if (std.mem.startsWith(u8, name, "KP_")) {
+        const key = name[3..];
+        if (key.len == 1 and std.ascii.isDigit(key[0])) {
+            b.key = keypad_zero + @as(u16, key[0] - '0');
+            return b;
+        }
+        const names = .{
+            .{ "Decimal", keypad_decimal },  .{ "Delete", keypad_decimal },
+            .{ "Enter", keypad_enter },      .{ "Add", keypad_plus },
+            .{ "Subtract", keypad_minus },   .{ "Multiply", keypad_multiply },
+            .{ "Divide", keypad_divide },    .{ "Equal", keypad_equal },
+            .{ "Insert", keypad_zero },      .{ "End", keypad_zero + 1 },
+            .{ "Down", keypad_zero + 2 },    .{ "Page_Down", keypad_zero + 3 },
+            .{ "Next", keypad_zero + 3 },    .{ "Left", keypad_zero + 4 },
+            .{ "Begin", keypad_zero + 5 },   .{ "Right", keypad_zero + 6 },
+            .{ "Home", keypad_zero + 7 },    .{ "Up", keypad_zero + 8 },
+            .{ "Page_Up", keypad_zero + 9 }, .{ "Prior", keypad_zero + 9 },
+        };
+        inline for (names) |pair| if (std.mem.eql(u8, key, pair[0])) {
+            b.key = pair[1];
+            return b;
+        };
+        return error.UnknownKey;
     }
     if (name.len == 1 and std.ascii.isUpper(name[0])) b.modifiers |= shift;
     const named = .{ .{ "plus", @as(u16, '+') }, .{ "minus", @as(u16, '-') }, .{ "asterisk", @as(u16, '*') }, .{ "slash", @as(u16, '/') }, .{ "exclam", @as(u16, '!') }, .{ "bracketleft", @as(u16, '[') }, .{ "bracketright", @as(u16, ']') }, .{ "less", @as(u16, '<') }, .{ "greater", @as(u16, '>') }, .{ "underscore", @as(u16, '_') }, .{ "bar", @as(u16, '|') }, .{ "question", @as(u16, '?') } };
@@ -268,7 +390,28 @@ test "bindings are overridden while config errors leave valid settings usable" {
 }
 
 pub fn actionName(name: []const u8) ?Action {
-    const names = .{ .{ "next_img", Action.next }, .{ "prev_img", Action.previous }, .{ "first_img", Action.first }, .{ "last_img", Action.last }, .{ "toggle_fullscreen", Action.fullscreen }, .{ "reload_image", Action.reload }, .{ "toggle_pause", Action.slideshow }, .{ "toggle_actions", Action.draw_actions }, .{ "toggle_filenames", Action.draw_filename }, .{ "toggle_info", Action.info }, .{ "toggle_aliasing", Action.nearest }, .{ "toggle_keep_vp", Action.keep_view }, .{ "zoom_default", Action.actual }, .{ "zoom_fit", Action.fit }, .{ "zoom_fill", Action.fill }, .{ "next_dir", Action.next_directory }, .{ "prev_dir", Action.previous_directory }, .{ "jump_fwd", Action.jump_forward }, .{ "jump_back", Action.jump_back }, .{ "orient_1", Action.rotate_right }, .{ "orient_3", Action.rotate_left }, .{ "flip", Action.mirror_vertical }, .{ "mirror", Action.mirror_horizontal }, .{ "remove", Action.remove }, .{ "delete", Action.trash } };
+    const names = .{
+        .{ "next_img", Action.next },                    .{ "prev_img", Action.previous },
+        .{ "first_img", Action.first },                  .{ "last_img", Action.last },
+        .{ "jump_first", Action.first },                 .{ "jump_last", Action.last },
+        .{ "toggle_menu", Action.menu },                 .{ "toggle_fullscreen", Action.fullscreen },
+        .{ "reload_image", Action.reload },              .{ "toggle_pause", Action.slideshow },
+        .{ "toggle_actions", Action.draw_actions },      .{ "toggle_filenames", Action.draw_filename },
+        .{ "toggle_info", Action.info },                 .{ "toggle_aliasing", Action.nearest },
+        .{ "toggle_keep_vp", Action.keep_view },         .{ "toggle_auto_zoom", Action.auto_zoom },
+        .{ "zoom_default", Action.actual },              .{ "zoom_fit", Action.fit },
+        .{ "zoom_fill", Action.fill },                   .{ "size_to_image", Action.resize_window },
+        .{ "next_dir", Action.next_directory },          .{ "prev_dir", Action.previous_directory },
+        .{ "jump_fwd", Action.jump_forward },            .{ "jump_back", Action.jump_back },
+        .{ "jump_random", Action.random },               .{ "orient_1", Action.rotate_right },
+        .{ "orient_3", Action.rotate_left },             .{ "flip", Action.mirror_vertical },
+        .{ "mirror", Action.mirror_horizontal },         .{ "remove", Action.remove },
+        .{ "delete", Action.trash },                     .{ "scroll_left", Action.pan_right },
+        .{ "scroll_right", Action.pan_left },            .{ "scroll_up", Action.pan_down },
+        .{ "scroll_down", Action.pan_up },               .{ "scroll_left_page", Action.pan_left_page },
+        .{ "scroll_right_page", Action.pan_right_page }, .{ "scroll_up_page", Action.pan_up_page },
+        .{ "scroll_down_page", Action.pan_down_page },
+    };
     inline for (names) |pair| if (std.mem.eql(u8, name, pair[0])) return pair[1];
     const more = .{ .{ "toggle_menu", Action.menu }, .{ "jump_first", Action.first }, .{ "jump_last", Action.last }, .{ "jump_random", Action.random }, .{ "size_to_image", Action.resize_window }, .{ "toggle_auto_zoom", Action.auto_zoom }, .{ "toggle_keep_vp", Action.keep_view }, .{ "scroll_left", Action.pan_right }, .{ "scroll_right", Action.pan_left }, .{ "scroll_up", Action.pan_down }, .{ "scroll_down", Action.pan_up }, .{ "scroll_left_page", Action.pan_left_page }, .{ "scroll_right_page", Action.pan_right_page }, .{ "scroll_up_page", Action.pan_up_page }, .{ "scroll_down_page", Action.pan_down_page } };
     inline for (more) |pair| if (std.mem.eql(u8, name, pair[0])) return pair[1];
@@ -292,4 +435,18 @@ test "clipboard actions and shortcuts are absent" {
     try std.testing.expect(settings.lookup('c', command | shift) == null);
     settings.parse("bind c = copy_image\n");
     try std.testing.expectEqual(@as(usize, 1), settings.error_line);
+}
+
+test "feh keypad defaults and mouse action names" {
+    var settings = Settings.init();
+    try std.testing.expectEqual(Action.zoom_in, settings.lookup(keypad_plus, 0));
+    settings.parseKeys("zoom_in\naction_2 KP_Enter\njump_first Home\n");
+    try std.testing.expectEqual(null, settings.lookup(keypad_plus, 0));
+    try std.testing.expectEqual(Action.action_2, settings.lookup(keypad_enter, 0));
+    try std.testing.expectEqual(Action.first, settings.lookup(0xF729, 0));
+    settings.parseButtons("pan 2\nzoom 3\nnext_img 1\naction_1 C-1\ntoggle_menu 8\n");
+    try std.testing.expectEqual(@as(usize, 0), settings.error_line);
+    try std.testing.expectEqual(MouseAction.pan, settings.lookupButton(2, 0));
+    try std.testing.expectEqual(MouseAction{ .action = .action_1 }, settings.lookupButton(1, control));
+    try std.testing.expectEqual(MouseAction{ .action = .menu }, settings.lookupButton(8, 0));
 }

@@ -39,6 +39,7 @@ pub const Command = struct {
 };
 pub const Snapshot = struct {
     path: []const u8,
+    mode: enum { slideshow, list, loadables, unloadables } = .slideshow,
     width: u32 = 0,
     height: u32 = 0,
     bytes: u64 = 0,
@@ -86,11 +87,43 @@ const Writer = struct {
         try self.add("'");
     }
 };
+/// feh uses a padded number and a unit suffix for file bytes and pixels.
+pub fn humanSize(buffer: []u8, amount: u64) ![]const u8 {
+    const units = " kMGTPE";
+    var scaled: f64 = @floatFromInt(amount);
+    var unit: usize = 0;
+    while (scaled >= 1000 and unit + 1 < units.len) : (unit += 1) scaled /= 1000;
+    const text = try std.fmt.bufPrint(buffer, "{d:>3.0}{c}", .{ scaled, units[unit] });
+    return text[0..@min(4, text.len)];
+}
+
 pub fn format(output: []u8, template: []const u8, image: Snapshot) ![:0]const u8 {
+    return formatFor(output, template, image, .shell);
+}
+
+pub fn formatList(output: []u8, template: []const u8, image: Snapshot) ![:0]const u8 {
+    return formatFor(output, template, image, .text);
+}
+
+fn formatFor(output: []u8, template: []const u8, image: Snapshot, kind: enum { shell, text }) ![:0]const u8 {
     if (output.len == 0) return error.CommandTooLong;
     var writer: Writer = .{ .output = output[0 .. output.len - 1] };
     var i: usize = 0;
     while (i < template.len) : (i += 1) {
+        if (kind == .text and template[i] == '\\' and i + 1 < template.len) {
+            const escaped: ?u8 = switch (template[i + 1]) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                else => null,
+            };
+            if (escaped) |value| {
+                try writer.add(&.{value});
+                i += 1;
+                continue;
+            }
+        }
         if (template[i] != '%') {
             try writer.add(template[i..][0..1]);
             continue;
@@ -101,25 +134,30 @@ pub fn format(output: []u8, template: []const u8, image: Snapshot) ![:0]const u8
             '%' => try writer.add("%"),
             'F' => try writer.quoted(image.path),
             'N' => try writer.quoted(std.fs.path.basename(image.path)),
-            'f', 'n' => return error.UnsafeSpecifier,
+            'f', 'n' => {
+                if (kind == .shell) return error.UnsafeSpecifier;
+                try writer.add(if (template[i] == 'f') image.path else std.fs.path.basename(image.path));
+            },
             'w' => try writer.number("{d}", .{image.width}),
             'h' => try writer.number("{d}", .{image.height}),
             's' => try writer.number("{d}", .{image.bytes}),
-            'S' => try writer.number("{d:.1}MB", .{@as(f64, @floatFromInt(image.bytes)) / 1e6}),
+            'S', 'P' => {
+                var buffer: [32]u8 = undefined;
+                try writer.add(try humanSize(&buffer, if (template[i] == 'S') image.bytes else @as(u64, image.width) * image.height));
+            },
             'p' => try writer.number("{d}", .{@as(u64, image.width) * image.height}),
-            'P' => try writer.number("{d:.1}MP", .{@as(f64, @floatFromInt(@as(u64, image.width) * image.height)) / 1e6}),
             'l' => try writer.number("{d}", .{image.count}),
             'u' => try writer.number("{d}", .{image.index}),
-            'g' => try writer.number("{d},{d}", .{ image.viewport_width, image.viewport_height }),
-            'o' => try writer.number("{d:.0},{d:.0}", .{ image.offset_x, image.offset_y }),
-            'z' => try writer.number("{d:.2}", .{image.zoom * 100}),
-            'Z' => try writer.number("{d:.8}", .{image.zoom * 100}),
-            'r' => try writer.number("{d:.8}", .{@as(f64, @floatFromInt(image.rotation)) * std.math.pi / 2.0}),
+            'g' => if (image.mode == .slideshow) try writer.number("{d},{d}", .{ image.viewport_width, image.viewport_height }),
+            'o' => if (image.mode == .slideshow) try writer.number("{d:.0},{d:.0}", .{ image.offset_x, image.offset_y }),
+            'z' => try writer.number("{d:.2}", .{image.zoom}),
+            'Z' => if (image.mode == .slideshow) try writer.number("{d:.8}", .{image.zoom}),
+            'r' => if (image.mode == .slideshow) try writer.number("{d:.8}", .{@as(f64, @floatFromInt(image.rotation)) * std.math.pi / 2.0}),
             'a' => try writer.add(if (image.playing) "playing" else "paused"),
-            'm' => try writer.add("slideshow"),
+            'm' => try writer.add(@tagName(image.mode)),
             'v' => try writer.add(@import("version.zig").text),
             'V' => try writer.number("{d}", .{image.pid}),
-            't' => try writer.quoted(image.image_format),
+            't' => if (kind == .shell) try writer.quoted(image.image_format) else try writer.add(image.image_format),
             'L' => if (image.manifest.len > 0) try writer.quoted(image.manifest) else return error.ManifestUnavailable,
             else => return error.InvalidSpecifier,
         }
@@ -130,9 +168,9 @@ pub fn format(output: []u8, template: []const u8, image: Snapshot) ![:0]const u8
 test "hook coordinates report image position rather than center-relative pan" {
     const source: Snapshot = .{ .path = "scan.tif", .width = 640, .height = 480, .index = 3, .count = 5 };
     const cases = [_]struct { viewport: core.Size, view: core.View, expected: []const u8 }{
-        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{}, .expected = "1000,700|180,110|100.00" },
-        .{ .viewport = .{ .width = 320, .height = 240 }, .view = .{ .pan_x = -16, .pan_y = 32 }, .expected = "320,240|-176,-88|100.00" },
-        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{ .scale = 2, .pan_x = 17, .pan_y = -9 }, .expected = "1000,700|-123,-139|200.00" },
+        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{}, .expected = "1000,700|180,110|1.00" },
+        .{ .viewport = .{ .width = 320, .height = 240 }, .view = .{ .pan_x = -16, .pan_y = 32 }, .expected = "320,240|-176,-88|1.00" },
+        .{ .viewport = .{ .width = 1000, .height = 700 }, .view = .{ .scale = 2, .pan_x = 17, .pan_y = -9 }, .expected = "1000,700|-123,-139|2.00" },
     };
     for (cases) |case| {
         const snapshot = source.withView(case.view, case.viewport);

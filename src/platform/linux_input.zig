@@ -123,6 +123,12 @@ pub fn testDrop(path: [*:0]const u8) void {
         _ = c.SDL_PushEvent(&injected);
     }
 }
+fn eventModifiers(modifiers: c.SDL_Keymod) u32 {
+    return @as(u32, @intFromBool(modifiers & c.SDL_KMOD_SHIFT != 0)) |
+        (@as(u32, @intFromBool(modifiers & c.SDL_KMOD_CTRL != 0)) << 1) |
+        (@as(u32, @intFromBool(modifiers & c.SDL_KMOD_ALT != 0)) << 2) |
+        (@as(u32, @intFromBool(modifiers & c.SDL_KMOD_GUI != 0)) << 3);
+}
 fn portableKey(key: c.SDL_Keycode) c_int {
     return switch (key) {
         c.SDLK_LEFT => 0xf702,
@@ -135,7 +141,7 @@ fn portableKey(key: c.SDL_Keycode) c_int {
         c.SDLK_PAGEDOWN => 0xf72d,
         c.SDLK_DELETE => 0xf728,
         c.SDLK_BACKSPACE => 0x7f,
-        else => if (key <= 0xffff) @intCast(key) else 0,
+        else => std.math.cast(c_int, key) orelse 0,
     };
 }
 fn scale(window: ?*c.SDL_Window) struct { x: f32, y: f32 } {
@@ -174,7 +180,7 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
             out.key_code = if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) @intCast(e.key.scancode) else @intCast(e.key.key);
             out.repeated = e.key.repeat;
             out.key = portableKey(if (e.key.scancode != c.SDL_SCANCODE_UNKNOWN) c.SDL_GetKeyFromScancode(e.key.scancode, e.key.mod, false) else e.key.key);
-            out.modifiers = @as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_SHIFT != 0)) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_CTRL != 0)) << 1) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_ALT != 0)) << 2) | (@as(u32, @intFromBool(e.key.mod & c.SDL_KMOD_GUI != 0)) << 3);
+            out.modifiers = eventModifiers(e.key.mod);
         },
         c.SDL_EVENT_KEY_UP => {
             out.window_id = e.key.windowID;
@@ -206,6 +212,8 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
             out.window_id = e.wheel.windowID;
             out.kind = 3;
             out.y = e.wheel.y;
+            out.modifiers = eventModifiers(c.SDL_GetModState());
+            out.wheel_button = if (e.wheel.y != 0) (if (e.wheel.y > 0) 4 else 5) else if (e.wheel.x != 0) (if (e.wheel.x > 0) 6 else 7) else 0;
             const window = c.SDL_GetWindowFromID(e.wheel.windowID) orelse return;
             const s = scale(window);
             out.anchor_x = e.wheel.mouse_x * s.x;
@@ -225,6 +233,7 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
             out.x = e.button.x * s.x;
             out.y = e.button.y * s.y;
             out.key = e.button.button;
+            out.modifiers = eventModifiers(c.SDL_GetModState());
             if (e.type == c.SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 out.kind = 6;
                 w.mouse_distance = 0;
@@ -239,20 +248,24 @@ pub fn eventWithTimeout(out: *t.Event, timeout_ms: c_int) void {
         c.SDL_EVENT_MOUSE_MOTION => {
             out.mouse_id = e.motion.which;
             out.window_id = e.motion.windowID;
-            if (e.motion.state & (c.SDL_BUTTON_LMASK | c.SDL_BUTTON_MMASK) != 0) {
+            if (e.motion.state != 0) {
                 const window = c.SDL_GetWindowFromID(e.motion.windowID) orelse return;
                 const w = context(window) orelse return;
-                const s = scale(window);
+                const pixels = scale(window);
                 w.mouse_distance += @abs(e.motion.xrel) + @abs(e.motion.yrel);
+                out.drag_button = @intCast(w.mouse_button);
+                out.drag_x = e.motion.xrel * pixels.x;
+                out.drag_y = e.motion.yrel * pixels.y;
+                out.drag_zoom = -e.motion.yrel / 48;
+                out.anchor_x = w.mouse_anchor_x;
+                out.anchor_y = w.mouse_anchor_y;
                 if (e.motion.state & c.SDL_BUTTON_MMASK != 0) {
                     out.kind = 9;
-                    out.y = -e.motion.yrel / 48;
-                    out.anchor_x = w.mouse_anchor_x;
-                    out.anchor_y = w.mouse_anchor_y;
-                } else {
+                    out.y = out.drag_zoom;
+                } else if (e.motion.state & c.SDL_BUTTON_LMASK != 0) {
                     out.kind = 4;
-                    out.x = e.motion.xrel * s.x;
-                    out.y = e.motion.yrel * s.y;
+                    out.x = out.drag_x;
+                    out.y = out.drag_y;
                 }
             }
         },

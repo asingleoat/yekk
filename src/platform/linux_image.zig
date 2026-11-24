@@ -51,7 +51,7 @@ pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const s
     defer file.close();
     if (std.meta.activeTag(file.format) == .jxl) {
         const header = jxl.probe(file, cancel) catch return -1;
-        result.* = .{ .width = header.extent.width, .height = header.extent.height, .bits = header.bits };
+        result.* = .{ .width = header.extent.width, .height = header.extent.height, .bits = header.bits, .alpha = !header.opaque_source };
         @memcpy(result.format[0..3], "jxl");
         return 0;
     }
@@ -64,7 +64,7 @@ pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const s
     if (std.meta.activeTag(file.format) == .png) {
         const plan = @import("png").Plan.read(file, cancel) catch return -1;
         const size = plan.extent();
-        result.* = .{ .width = size.width, .height = size.height, .bits = if (plan.header.depth == 16) 16 else 8 };
+        result.* = .{ .width = size.width, .height = size.height, .bits = if (plan.header.depth == 16) 16 else 8, .alpha = !plan.opaqueSource() };
         @memcpy(result.format[0..3], "png");
         return 0;
     }
@@ -91,7 +91,7 @@ pub fn probeWithCancel(path: [*:0]const u8, result: *Metadata, cancel: ?*const s
     if (input.*.BandFmt < c.VIPS_FORMAT_UCHAR or input.*.BandFmt >= c.VIPS_FORMAT_LAST) return -1;
     const orientation = c.vips_image_get_orientation(input);
     if (orientation < 1 or orientation > 8) return -1;
-    result.* = .{ .width = if (orientation >= 5) extent.height else extent.width, .height = if (orientation >= 5) extent.width else extent.height, .bits = @intCast(c.vips_format_sizeof(input.*.BandFmt) * 8) };
+    result.* = .{ .width = if (orientation >= 5) extent.height else extent.width, .height = if (orientation >= 5) extent.width else extent.height, .bits = @intCast(c.vips_format_sizeof(input.*.BandFmt) * 8), .alpha = c.vips_image_hasalpha(input) != 0 };
     var loader: [*c]const u8 = "unknown";
     _ = c.vips_image_get_string(input, "vips-loader", &loader);
     const name = t.text(loader);

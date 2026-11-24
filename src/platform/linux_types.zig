@@ -65,10 +65,15 @@ pub const Event = struct {
     modifiers: u32 = 0,
     window_id: u32 = 0,
     mouse_id: u32 = 0,
+    wheel_button: u8 = 0,
+    drag_button: u8 = 0,
+    drag_x: f32 = 0,
+    drag_y: f32 = 0,
+    drag_zoom: f32 = 0,
     timestamp: u64 = 0,
 };
 pub const Geometry = struct { width: c_int = 0, height: c_int = 0, x: c_int = 0, y: c_int = 0, valid: c_int = 0 };
-pub const Metadata = struct { width: u32 = 0, height: u32 = 0, bits: u32 = 0, format: [32]u8 = @splat(0) };
+pub const Metadata = struct { width: u32 = 0, height: u32 = 0, bits: u32 = 0, alpha: bool = false, format: [32]u8 = @splat(0) };
 pub const window_limit = 8;
 pub const Selection = struct { bytes: [1048576]u8 = undefined, offsets: [16384]u32 = undefined, count: u32 = 0, used: u32 = 0, window_id: u32 = 0 };
 pub const Window = struct {

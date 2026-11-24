@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
@@ -36,6 +37,59 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     assert cli('--sort=filename', '--version-sort', '--print-filelist', *plain).splitlines() == list(map(str, plain))
     info = cli('-l', paths[0]).splitlines()
     assert info[0].startswith('NUM\tFORMAT\tWIDTH') and info[1].split('\t')[1:4] == ['png', '3', '2'], info
+    # These headless cases also run on Linux, before the platform-specific
+    # native hook and single-instance checks below.
+    valid_png = work / "alpha.png"
+    valid_png.write_bytes((root / "tests/fixtures/alpha.content").read_bytes())
+    valid_jpeg = work / "orientation6.jpg"
+    valid_jpeg.write_bytes((root / "tests/fixtures/orientation6.jpg").read_bytes())
+    broken = work / "truncated.png"
+    broken.write_bytes((root / "tests/fixtures/truncated.png").read_bytes())
+    rows = cli("-l", "orientation6.jpg", "truncated.png", "alpha.png").splitlines()
+    assert rows == [
+        "NUM\tFORMAT\tWIDTH\tHEIGHT\tPIXELS\tSIZE\tALPHA\tFILENAME",
+        "1\tjpg\t2\t3\t  6 \t898 \t-\torientation6.jpg",
+        "2\tpng\t3\t2\t  6 \t 83 \tX\talpha.png",
+    ], rows
+    assert cli("-L", r"%m\t%w,%h\t%t\t%f\t%n", "./orientation6.jpg") == (
+        "list\t2,3\tjpg\t./orientation6.jpg\torientation6.jpg\n"
+    )
+
+    def classify(flag, paths, status, text):
+        run = subprocess.run([str(viewer), flag, *paths], cwd=work, env=env,
+                             text=True, capture_output=True, timeout=5)
+        assert (run.returncode, run.stdout) == (status, text), run
+
+    classify("-U", ["alpha.png", "truncated.png"], 1, "alpha.png\n")
+    classify("-u", ["alpha.png", "truncated.png"], 1, "truncated.png\n")
+    classify("--loadable", ["alpha.png"], 0, "alpha.png\n")
+    classify("--unloadable", ["truncated.png"], 0, "truncated.png\n")
+    classify("--loadable", ["alpha.png", "missing.png"], 0, "alpha.png\n")
+    classify("-l", ["truncated.png"], 1, "")
+    assert cli("-L", "%u/%l|%z|%Z|%r", "alpha.png", "truncated.png", "orientation6.jpg") == (
+        "1/2|1.00||\n2/2|1.00||\n"
+    )
+    assert cli("-L%n", "--sort=width", "alpha.png", "orientation6.jpg") == "orientation6.jpg\nalpha.png\n"
+    assert cli("-L%n", "--sort=height", "orientation6.jpg", "alpha.png") == "alpha.png\norientation6.jpg\n"
+    assert cli("-L%n", "--sort=format", "alpha.png", "orientation6.jpg") == "orientation6.jpg\nalpha.png\n"
+    assert cli("-L%n", "--min-dimension", "3x0", "orientation6.jpg", "alpha.png") == "alpha.png\n"
+    assert cli("-L%n", "--max-dimension", "0x2", "orientation6.jpg", "alpha.png") == "alpha.png\n"
+    assert cli("-L%n", "--sort=none", "orientation6.jpg", "alpha.png") == "orientation6.jpg\nalpha.png\n"
+
+    configs = Path(env["XDG_CONFIG_HOME"]) / "feh"
+    configs.mkdir(parents=True)
+    (configs / "themes").write_text("triage --sort height --customlist '%h %n' \\\n --max-dimension 200x200\n")
+    assert cli("-Ttriage", "orientation6.jpg", "alpha.png") == "2 alpha.png\n3 orientation6.jpg\n"
+    assert cli("-Ttriage", "--sort=width", "alpha.png", "orientation6.jpg") == "3 orientation6.jpg\n2 alpha.png\n"
+    cli("-L%n", "-A", "printf '%%s\\n' %F > \"$LOG\"", "orientation6.jpg")
+    assert (work / "actions.log").read_text() == "orientation6.jpg\n"
+    (work / "actions.log").unlink()
+    assert cli("-L%n", "-A", "printf 'action: %%s\\n' %F", "orientation6.jpg", "alpha.png") == (
+        "action: orientation6.jpg\naction: alpha.png\norientation6.jpg\nalpha.png\n"
+    )
+    if "--headless" in sys.argv[1:]:
+        print("feh listing, catalog and theme checks passed")
+        raise SystemExit(0)
     output = gui('-xg960x640-0+0', '--hook-test', '-f', work / 'session-list', '-G', '-A', "printf 'zero\\n' >> \"$LOG\"; printf '%%s\\n' %g %w %h %z %o > \"$HOOK_VIEW\"", '--action1=[Keep]mv %F "$KEEP/"',
                  '--action2=;[Inspect]printf inspect >> "$LOG"', '--action3=exit 7', '--action4=sleep 0.2; test -f %F',
                  '--action5=sleep 0.2; mv %F "$DISCARD/"', '--action7=echo %f', '--action8=cat %L > "$MANIFEST"', *paths)
@@ -44,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='yekk-feh-') as directory:
     viewport, width, height, zoom, origin = (work / 'hook-view').read_text().splitlines()
     vw, vh = map(int, viewport.split(','))
     x, y = map(int, origin.split(','))
-    scale = float(zoom) / 100
+    scale = float(zoom)
     assert abs(x - (vw - int(width) * scale) / 2) <= 0.5
     assert abs(y - (vh - int(height) * scale) / 2) <= 0.5
     assert not paths[0].exists() and (work / 'discard' / paths[0].name).is_file()

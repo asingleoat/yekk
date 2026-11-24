@@ -202,6 +202,7 @@ pub const Metadata = struct {
     height: u32,
     format: [128]u8 = undefined,
     format_len: usize = 0,
+    alpha: bool = false,
 };
 pub fn metadata(path: []const u8) Failure!Metadata {
     return metadataWithCancel(path, null);
@@ -212,8 +213,9 @@ pub fn metadataWithCancel(path: []const u8, cancel: ?*const std.atomic.Value(boo
     defer opened.close();
     const source_format = std.meta.activeTag(opened.format);
     if (source_format == .jxl or source_format == .raw) {
-        const size = if (source_format == .jxl) (try jxl.probe(opened, cancel)).extent else try raw.probe(opened, cancel);
-        var result: Metadata = .{ .width = size.width, .height = size.height, .format_len = 3 };
+        const header = if (source_format == .jxl) try jxl.probe(opened, cancel) else null;
+        const size = if (header) |value| value.extent else try raw.probe(opened, cancel);
+        var result: Metadata = .{ .width = size.width, .height = size.height, .format_len = 3, .alpha = if (header) |value| !value.opaque_source else false };
         @memcpy(result.format[0..3], if (source_format == .jxl) "jxl" else "raw");
         return result;
     }
@@ -226,7 +228,7 @@ pub fn metadataWithCancel(path: []const u8, cancel: ?*const std.atomic.Value(boo
     }
     if (source_format == .png) {
         const plan = try @import("png").Plan.read(opened, cancel);
-        var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height, .format_len = 3 };
+        var result: Metadata = .{ .width = plan.extent().width, .height = plan.extent().height, .format_len = 3, .alpha = !plan.opaqueSource() };
         @memcpy(result.format[0..3], "png");
         return result;
     }
@@ -251,7 +253,11 @@ pub fn metadataWithCancel(path: []const u8, cancel: ?*const std.atomic.Value(boo
     const orientation = (try number(props, n.kCGImagePropertyOrientation)) orelse 1;
     if (orientation < 1 or orientation > 8) return error.InvalidDimensions;
     if (orientation >= 5 and orientation <= 8) std.mem.swap(i64, &width, &height);
-    var result: Metadata = .{ .width = @intCast(width), .height = @intCast(height) };
+    const alpha = if (n.CFDictionaryGetValue(props, n.kCGImagePropertyHasAlpha)) |value|
+        n.CFGetTypeID(value) == n.CFBooleanGetTypeID() and n.CFBooleanGetValue(value) != 0
+    else
+        false;
+    var result: Metadata = .{ .width = @intCast(width), .height = @intCast(height), .alpha = alpha };
     const kind = n.CGImageSourceGetType(source) orelse return error.UnreadableImage;
     if (n.CFStringGetCString(kind, &result.format, result.format.len, 0x08000100) == 0) return error.UnreadableImage;
     result.format_len = std.mem.indexOfScalar(u8, &result.format, 0) orelse return error.UnreadableImage;

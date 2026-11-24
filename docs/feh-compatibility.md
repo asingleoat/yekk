@@ -27,6 +27,7 @@ to the list. You can supply several files and directories.
 | `-r`, `--recursive` | Include subdirectories. Do not follow symbolic links to directories. |
 | `--no-recursive` | Exclude subdirectories. |
 | `-S MODE`, `--sort MODE` | Choose the ordering described below. |
+| `--min-dimension WIDTHxHEIGHT`, `--max-dimension WIDTHxHEIGHT` | Limit image dimensions in pixels. A zero or negative axis has no limit. |
 | `--version-sort` | Compare numbers numerically in `name`, `filename` or `dirname` ordering. |
 | `-n`, `--reverse` | Reverse the list order. |
 | `-z`, `--randomize` | Shuffle the list. Shuffle again when advancing from the last image to the first. |
@@ -38,8 +39,15 @@ to the list. You can supply several files and directories.
 | `dirname` | Parent-directory paths, in case-sensitive text order. |
 | `mtime` | File modification time, newest first. |
 | `size` | File size on disk, smallest first. |
+| `width`, `height`, `pixels` | Image width, height or pixel count, smallest first. |
+| `format` | Image format name, in text order. |
 | `none` | Input order and filesystem directory-enumeration order. |
 | `natural` | Filenames with numeric comparison: `frame2.tif` before `frame10.tif`. This is Yekk's default. |
+
+Dimension filters and metadata sorts probe images on a worker before
+selection. For `--start-at`, use the same path spelling as the input. If
+there is no exact match, Yekk starts at the first entry with the same
+filename.
 
 ### Window size and zoom
 
@@ -73,8 +81,9 @@ Zooming out divides it by 1.25. For example, 100% becomes 125% or 80%.
 
 `--keep-zoom-vp` keeps the image's top-left position when switching images.
 Panning is constrained separately on each axis: smaller images remain inside the
-viewport, and larger images continue to cover it. It does not save a separate view
-for every image.
+viewport, and larger images continue to cover it. There is one retained view
+for the window. Yekk also carries an adjusted zoom when you set a numeric
+`--zoom` at startup.
 
 Geometry uses `WIDTHxHEIGHT`, optionally followed by signed X and Y offsets.
 For example, `960x640+20+30` requests a 960×640 window, offset 20 from the left
@@ -119,13 +128,25 @@ the link itself, not its target.
 
 | Option | Output, without opening a window |
 | --- | --- |
-| `-l`, `--list` | Image format, dimensions, pixel count, file size and filename. |
+| `-l`, `--list` | Tab-separated rows with image dimensions, format, pixel count, size, alpha and input path. |
+| `-L FORMAT`, `--customlist FORMAT` | One line for each readable image header, formatted with placeholders. |
+| `-U`, `--loadable` | Print paths that Yekk decodes. Exit with status 1 if any image fails. |
+| `-u`, `--unloadable` | Print paths that Yekk cannot decode. Exit with status 1 if any image succeeds. |
 | `--print-filelist` | One path per line. |
 | `--formats` | Supported filename extensions for the current decoder backend. |
 | `-h`, `--help` | Command-line usage. |
 | `-v`, `--version` | Yekk version. |
 
-`--list` reads file headers. It does not check whether every pixel can be decoded.
+`--list` and `--customlist` read headers and skip unreadable ones.
+The loadability modes decode and release one image at a time. The feh
+listing modes keep the path spelling supplied on the command line or read
+from a file list. `--print-filelist` prints absolute paths.
+
+For custom output, `%f` prints the path and `%n` prints the filename.
+The other metadata placeholders are listed under
+[command placeholders](#command-placeholders). In these modes, `-A` runs
+once for each row or path printed. These commands write to the terminal or
+output stream that started Yekk.
 
 ## Triage hooks
 
@@ -166,18 +187,18 @@ Do not add quotation marks around `%F`, `%N`, `%t` or `%L`.
 | `%w` | Image width in pixels. |
 | `%h` | Image height in pixels. |
 | `%s` | File size on disk, in bytes. |
-| `%S` | File size in decimal megabytes, with one decimal place. |
+| `%S` | File size with a human-readable unit. |
 | `%p` | Image pixel count. |
-| `%P` | Image size in decimal megapixels, with one decimal place. |
+| `%P` | Pixel count with a human-readable unit. |
 | `%u` | Image position in the list, starting at 1. |
 | `%l` | Number of images in the list. |
 | `%g` | Viewport width and height as `W,H`, in backing pixels. |
 | `%o` | Image's top-left X and Y position as `X,Y`, in backing pixels. |
-| `%z` | Zoom percentage with two decimal places. |
-| `%Z` | Zoom percentage with eight decimal places. |
+| `%z` | Zoom factor with two decimal places. Actual size is 1.00. |
+| `%Z` | Zoom factor with eight decimal places in a viewer window. |
 | `%r` | Rotation in radians. |
 | `%a` | Slideshow state: `playing` or `paused`. |
-| `%m` | The text `slideshow`. |
+| `%m` | Current mode, such as `slideshow` or `list`. |
 | `%v` | Yekk name and version. |
 | `%V` | Yekk process ID. |
 | `%t` | Source image format. |
@@ -270,7 +291,7 @@ that action. An action name without keys removes its bindings.
 If several lines assign the same key, the last assignment wins.
 
 Prefixes select modifier keys: `C-` for Ctrl, `S-` for Shift, `1-` for Alt/Option,
-and `4-` for Super/Command. Uppercase letters imply Shift.
+and `4-` for Super/Command. Uppercase letters imply Shift. Common `KP_*` names select keypad keys.
 For example, `C-k` means hold Ctrl and press k.
 
 ```text
@@ -280,6 +301,21 @@ next_img space Right
 prev_img BackSpace Left
 jump_first Home
 jump_last End
+```
+
+Use `-T NAME` or `--theme NAME` to load a named theme from a feh
+`themes` file. Yekk looks in `$XDG_CONFIG_HOME/feh` or `~/.config/feh`,
+then in `/etc/feh`. The theme supplies options before the command line.
+
+Mouse bindings use feh button numbers and the same modifier prefixes as
+key bindings. Yekk reads `$XDG_CONFIG_HOME/yekk/buttons`, default
+`~/.config/yekk/buttons`. Use `--buttons FILE` to read a different file.
+
+```text
+pan 1
+zoom 2
+action_1 C-1
+toggle_menu 3
 ```
 
 Settings use `key = value` in `$XDG_CONFIG_HOME/yekk/config`, default
@@ -320,16 +356,14 @@ described above. Yekk's sizing modes are:
 
 The `natural` sort mode is a Yekk extension. Directory searches skip names
 starting with `.`. Explicit paths can open these files.
-The columns and formatting of `--list` differ from feh.
 
 Yekk does not support these feh features:
 
-- Themes, custom mouse-button files and pointer hiding.
+- Pointer hiding.
 - Full X11 keysym/keypad coverage and keyboard input from the terminal.
 - Captions, EXIF overlays and `--info` shell overlays.
-- Custom list formatting, `--loadable`, `--unloadable` and dimension/format sorts.
 - Source editing and saving transformed images.
-- Signal controls, URL downloads and streaming command output to the terminal.
+- Signal controls and URL downloads.
 - Montage, index and thumbnail modes.
 - X11/window-manager options, wallpaper setting and `-w`.
 

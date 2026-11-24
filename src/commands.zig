@@ -16,41 +16,69 @@ pub const Result = struct {
         return !self.cancelled and self.status == 0;
     }
 };
+fn capturePipe() ![2]c_int {
+    var pipe: [2]c_int = undefined;
+    if (c.pipe(&pipe) != 0) return error.PipeFailed;
+    errdefer {
+        _ = c.close(pipe[0]);
+        _ = c.close(pipe[1]);
+    }
+    // Keep the pipe separate from standard descriptors, even when closed.
+    for (&pipe) |*fd| if (fd.* < 3) {
+        const moved = c.fcntl(fd.*, c.F_DUPFD_CLOEXEC, @as(c_int, 3));
+        if (moved < 0) return error.PipeFailed;
+        _ = c.close(fd.*);
+        fd.* = moved;
+    };
+    if (c.fcntl(pipe[0], c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0 or c.fcntl(pipe[1], c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0) return error.PipeFailed;
+    if (c.fcntl(pipe[0], c.F_SETFL, @as(c_int, c.O_NONBLOCK)) < 0) return error.PipeFailed;
+    return pipe;
+}
+
+fn drain(fd: c_int, result: *Result) bool {
+    var buffer: [4096]u8 = undefined;
+    // Limit each batch so output cannot delay cancellation indefinitely.
+    for (0..16) |_| {
+        const count = c.read(fd, &buffer, buffer.len);
+        if (count <= 0) return false;
+        const keep = @min(@as(usize, @intCast(count)), result.output.len - result.len);
+        @memcpy(result.output[result.len..][0..keep], buffer[0..keep]);
+        result.len += keep;
+    }
+    return true;
+}
+
 pub fn run(command: [:0]const u8, cancel: *const std.atomic.Value(bool)) !Result {
+    return runWithOutput(command, cancel, .capture);
+}
+
+pub fn runWithOutput(command: [:0]const u8, cancel: *const std.atomic.Value(bool), output: enum { capture, inherit }) !Result {
     var result: Result = .{};
     if (cancel.load(.acquire)) {
         result.cancelled = true;
         return result;
     }
-    var pipe: [2]c_int = undefined;
-    if (c.pipe(&pipe) != 0) return error.PipeFailed;
-    // Keep the plumbing away from stdin/stdout/stderr even when the caller
-    // launched the viewer with one of those descriptors closed.
-    for (&pipe) |*fd| if (fd.* < 3) {
-        const moved = c.fcntl(fd.*, c.F_DUPFD_CLOEXEC, @as(c_int, 3));
-        if (moved < 0) {
-            _ = c.close(pipe[0]);
-            _ = c.close(pipe[1]);
-            return error.PipeFailed;
-        }
-        _ = c.close(fd.*);
-        fd.* = moved;
-    };
-    defer _ = c.close(pipe[0]);
+    const pipe = if (output == .capture) try capturePipe() else null;
     var write_open = true;
-    defer if (write_open) {
-        _ = c.close(pipe[1]);
+    defer if (pipe) |fds| {
+        _ = c.close(fds[0]);
+        if (write_open) _ = c.close(fds[1]);
     };
-    if (c.fcntl(pipe[0], c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0 or c.fcntl(pipe[1], c.F_SETFD, @as(c_int, c.FD_CLOEXEC)) != 0) return error.PipeFailed;
-    if (c.fcntl(pipe[0], c.F_SETFL, @as(c_int, c.O_NONBLOCK)) < 0) return error.PipeFailed;
     var files: c.posix_spawn_file_actions_t = undefined;
     if (c.posix_spawn_file_actions_init(&files) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawn_file_actions_destroy(&files);
-    if (c.posix_spawn_file_actions_addopen(&files, 0, "/dev/null", c.O_RDONLY, 0) != 0 or
-        c.posix_spawn_file_actions_adddup2(&files, pipe[1], 1) != 0 or
-        c.posix_spawn_file_actions_adddup2(&files, pipe[1], 2) != 0 or
-        c.posix_spawn_file_actions_addclose(&files, pipe[0]) != 0 or
-        c.posix_spawn_file_actions_addclose(&files, pipe[1]) != 0) return error.SpawnFailed;
+    if (c.posix_spawn_file_actions_addopen(&files, 0, "/dev/null", c.O_RDONLY, 0) != 0) return error.SpawnFailed;
+    if (pipe) |fds| {
+        if (c.posix_spawn_file_actions_adddup2(&files, fds[1], 1) != 0 or
+            c.posix_spawn_file_actions_adddup2(&files, fds[1], 2) != 0 or
+            c.posix_spawn_file_actions_addclose(&files, fds[0]) != 0 or
+            c.posix_spawn_file_actions_addclose(&files, fds[1]) != 0) return error.SpawnFailed;
+    } else if (n.darwin) {
+        // CLOEXEC_DEFAULT requires an explicit action for each inherited fd.
+        for ([_]c_int{ 1, 2 }) |fd| {
+            if (c.fcntl(fd, c.F_GETFD) >= 0 and c.posix_spawn_file_actions_addinherit_np(&files, fd) != 0) return error.SpawnFailed;
+        }
+    }
     if (!n.darwin and c.posix_spawn_file_actions_addclosefrom_np(&files, 3) != 0) return error.SpawnFailed;
     var attrs: c.posix_spawnattr_t = undefined;
     if (c.posix_spawnattr_init(&attrs) != 0) return error.SpawnFailed;
@@ -62,24 +90,13 @@ pub fn run(command: [:0]const u8, cancel: *const std.atomic.Value(bool)) !Result
     const args = [_:null]?[*:0]const u8{ "sh", "-c", command.ptr };
     var pid: c.pid_t = undefined;
     if (c.posix_spawn(&pid, "/bin/sh", &files, &attrs, @ptrCast(@constCast(&args)), if (n.darwin) _NSGetEnviron().* else environ) != 0) return error.SpawnFailed;
-    _ = c.close(pipe[1]);
-    write_open = false;
+    if (pipe) |fds| {
+        _ = c.close(fds[1]);
+        write_open = false;
+    }
     var terminated_at: ?f64 = null;
     while (true) {
-        // Drain even after the diagnostic buffer fills, so verbose commands
-        // cannot block on a full pipe. Limit each batch to observe cancellation.
-        var discarded: [4096]u8 = undefined;
-        var drained_batch = true;
-        for (0..16) |_| {
-            const count = c.read(pipe[0], &discarded, discarded.len);
-            if (count <= 0) {
-                drained_batch = false;
-                break;
-            }
-            const keep = @min(@as(usize, @intCast(count)), result.output.len - result.len);
-            @memcpy(result.output[result.len..][0..keep], discarded[0..keep]);
-            result.len += keep;
-        }
+        const drained_batch = if (pipe) |fds| drain(fds[0], &result) else false;
         if (cancel.load(.acquire) and terminated_at == null) {
             result.cancelled = true;
             _ = c.kill(-pid, c.SIGTERM);
@@ -92,13 +109,7 @@ pub fn run(command: [:0]const u8, cancel: *const std.atomic.Value(bool)) !Result
         if (waited == pid) {
             if (result.cancelled) _ = c.kill(-pid, c.SIGKILL);
             // waitpid may observe a fast exit just after the earlier read.
-            for (0..16) |_| {
-                const count = c.read(pipe[0], &discarded, discarded.len);
-                if (count <= 0) break;
-                const keep = @min(@as(usize, @intCast(count)), result.output.len - result.len);
-                @memcpy(result.output[result.len..][0..keep], discarded[0..keep]);
-                result.len += keep;
-            }
+            if (pipe) |fds| _ = drain(fds[0], &result);
             break;
         }
         if (waited < 0 and n.errno().* != c.EINTR) return error.WaitFailed;

@@ -194,6 +194,7 @@ const State = struct {
     show_filename: bool = false,
     mouse_moved: bool = false,
     middle_zoom: bool = false,
+    drag_button: ?u8 = null,
     mouse_origin: n.Point = .{ .x = 0, .y = 0 },
     geometry: core.View = .{},
     render_jobs: [2]RenderJob = @splat(.{}),
@@ -1222,7 +1223,7 @@ fn close() void {
 }
 
 fn loadSettings() void {
-    input.loadSettings(&s.index_settings, control.config_override, s.cli.keys) catch {
+    input.loadSettings(&s.index_settings, control.config_override, s.cli.keys, s.cli.buttons) catch {
         if (s.index_settings.error_line == 0) s.index_settings.error_line = 1;
     };
 }
@@ -1269,6 +1270,7 @@ fn indexWorker(context: ?*anyopaque) callconv(.c) void {
         n.dispatch_async_f(n.dispatch_get_main_queue(), s, indexReady);
         return;
     };
+    s.catalog.probe = catalogInfo;
     s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
         s.index_failure = err;
     };
@@ -1902,19 +1904,35 @@ fn resignedKey(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
     useSession(self);
     stopHeldAdvance();
 }
+fn keypadKey(code: u16) ?u16 {
+    return switch (code) {
+        82...89 => actions.keypad_zero + code - 82,
+        91, 92 => actions.keypad_zero + code - 83,
+        65 => actions.keypad_decimal,
+        76 => actions.keypad_enter,
+        69 => actions.keypad_plus,
+        78 => actions.keypad_minus,
+        67 => actions.keypad_multiply,
+        75 => actions.keypad_divide,
+        81 => actions.keypad_equal,
+        else => null,
+    };
+}
 fn keyDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
     defer s = previous;
     useSession(self);
     const event: O = .{ .value = raw };
     const chars = event.msgSend(O, "charactersIgnoringModifiers", .{});
-    if (chars.msgSend(usize, "length", .{}) == 0) return;
-    const key = chars.msgSend(u16, "characterAtIndex:", .{@as(usize, 0)});
+    const code = event.msgSend(u16, "keyCode", .{});
+    const key = keypadKey(code) orelse if (chars.msgSend(usize, "length", .{}) > 0)
+        chars.msgSend(u16, "characterAtIndex:", .{@as(usize, 0)})
+    else
+        return;
     const repeated = event.msgSend(bool, "isARepeat", .{});
     const action = s.settings.lookup(key, event.msgSend(usize, "modifierFlags", .{}));
     if (action == .next or action == .previous) {
         const direction: navigation.HeldAdvance.Direction = if (action == .next) .next else .previous;
-        const code = event.msgSend(u16, "keyCode", .{});
         if (repeated) {
             s.held_advance.repeat(code, direction);
             scheduleHeldAdvance();
@@ -1942,6 +1960,13 @@ fn scroll(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const dx = event.msgSend(f64, "scrollingDeltaX", .{});
     const dy = event.msgSend(f64, "scrollingDeltaY", .{});
     const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
+    if (s.settings.mouse_configured and !event.msgSend(bool, "hasPreciseScrollingDeltas", .{}) and (dy != 0 or dx != 0)) {
+        const button: u8 = if (dy != 0) (if (dy > 0) 4 else 5) else if (dx > 0) 6 else 7;
+        if (s.settings.lookupButton(button, event.msgSend(usize, "modifierFlags", .{}))) |bound| {
+            if (bound == .action) perform(bound.action);
+        }
+        return;
+    }
     if (event.msgSend(usize, "modifierFlags", .{}) & actions.command != 0) {
         const p = s.view.msgSend(n.Point, "convertPoint:fromView:", .{ event.msgSend(n.Point, "locationInWindow", .{}), nil });
         const vp = viewport();
@@ -1968,34 +1993,69 @@ fn magnify(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     layout();
     ensureDetail();
 }
+fn buttonNumber(event: O) u8 {
+    const number = event.msgSend(i64, "buttonNumber", .{});
+    return switch (number) {
+        0 => 1,
+        1 => 3,
+        2 => 2,
+        3...250 => @intCast(number + 5),
+        else => 0,
+    };
+}
 fn mouseDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
     defer s = previous;
     useSession(self);
+    const event: O = .{ .value = raw };
+    const button = buttonNumber(event);
+    const modifiers = if (s.settings.mouse_configured) event.msgSend(usize, "modifierFlags", .{}) else 0;
+    const action = s.settings.lookupButton(button, modifiers) orelse return;
+    stopHeldAdvance();
+    if (action == .action) {
+        if (action.action == .menu) showMenu(event) else perform(action.action);
+        return;
+    }
+    s.drag_button = button;
+    s.middle_zoom = action == .zoom;
     s.mouse_moved = false;
-    s.dragging = (O{ .value = raw }).msgSend(n.Point, "locationInWindow", .{});
+    s.dragging = event.msgSend(n.Point, "locationInWindow", .{});
     s.mouse_origin = s.dragging.?;
 }
-fn mouseUp(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
+fn mouseUp(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
     defer s = previous;
     useSession(self);
-    if (s.dragging != null and !s.mouse_moved) navigate(1, false);
+    if (s.drag_button != buttonNumber(.{ .value = raw })) return;
+    const legacy_click = !s.settings.mouse_configured and !s.mouse_moved;
+    const zoom = s.middle_zoom;
+    s.drag_button = null;
     s.dragging = null;
+    if (legacy_click) {
+        if (zoom) perform(.actual) else navigate(1, false);
+    }
 }
 fn mouseDragged(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
     const previous = s;
     defer s = previous;
     useSession(self);
-    const p = (O{ .value = raw }).msgSend(n.Point, "locationInWindow", .{});
-    if (s.dragging) |last| {
-        s.mouse_moved = s.mouse_moved or @abs(p.x - s.mouse_origin.x) > 2 or @abs(p.y - s.mouse_origin.y) > 2;
-        const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
-        s.geometry.pan_x += (p.x - last.x) * backing;
-        s.geometry.pan_y += (p.y - last.y) * backing;
-        layout();
+    const event: O = .{ .value = raw };
+    if (s.drag_button != buttonNumber(event)) return;
+    const last = s.dragging orelse return;
+    const point = event.msgSend(n.Point, "locationInWindow", .{});
+    s.mouse_moved = s.mouse_moved or @abs(point.x - s.mouse_origin.x) > 2 or @abs(point.y - s.mouse_origin.y) > 2;
+    const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
+    if (s.middle_zoom) {
+        const anchor = s.view.msgSend(n.Point, "convertPoint:fromView:", .{ s.mouse_origin, nil });
+        const vp = viewport();
+        s.geometry.zoom(@exp(std.math.clamp((point.x - last.x) * 0.01, -1, 1)), anchor.x * backing - vp.width / 2, anchor.y * backing - vp.height / 2);
+    } else {
+        s.geometry.pan_x += (point.x - last.x) * backing;
+        s.geometry.pan_y += (point.y - last.y) * backing;
     }
-    s.dragging = p;
+    s.dragging = point;
+    layout();
+    if (s.middle_zoom) ensureDetail();
 }
 fn showMenu(event: O) void {
     if (event.value == null) return;
@@ -2006,47 +2066,6 @@ fn showMenu(event: O) void {
     const item = main.msgSend(O, "itemWithTitle:", .{name});
     if (item.value == null) return;
     cls("NSMenu").msgSend(void, "popUpContextMenu:withEvent:forView:", .{ item.msgSend(O, "submenu", .{}), event, s.view });
-}
-fn rightMouseDown(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
-    const previous = s;
-    defer s = previous;
-    useSession(self);
-    stopHeldAdvance();
-    showMenu(.{ .value = raw });
-}
-fn middleMouseDown(self: objc.c.id, selector: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
-    const event: O = .{ .value = raw };
-    if (event.msgSend(i64, "buttonNumber", .{}) != 2) return;
-    mouseDown(self, selector, raw);
-    const previous = s;
-    defer s = previous;
-    useSession(self);
-    s.middle_zoom = true;
-}
-fn middleMouseDragged(self: objc.c.id, _: objc.c.SEL, raw: objc.c.id) callconv(.c) void {
-    const previous = s;
-    defer s = previous;
-    useSession(self);
-    if (!s.middle_zoom) return;
-    const point = (O{ .value = raw }).msgSend(n.Point, "locationInWindow", .{});
-    if (s.dragging) |last| {
-        s.mouse_moved = s.mouse_moved or @abs(point.x - s.mouse_origin.x) > 2;
-        const anchor = s.view.msgSend(n.Point, "convertPoint:fromView:", .{ s.mouse_origin, nil });
-        const backing = s.window.msgSend(f64, "backingScaleFactor", .{});
-        const vp = viewport();
-        s.geometry.zoom(@exp(std.math.clamp((point.x - last.x) * 0.01, -1, 1)), anchor.x * backing - vp.width / 2, anchor.y * backing - vp.height / 2);
-        layout();
-        ensureDetail();
-    }
-    s.dragging = point;
-}
-fn middleMouseUp(self: objc.c.id, _: objc.c.SEL, _: objc.c.id) callconv(.c) void {
-    const previous = s;
-    defer s = previous;
-    useSession(self);
-    if (s.middle_zoom and !s.mouse_moved) perform(.actual);
-    s.middle_zoom = false;
-    s.dragging = null;
 }
 fn actionClicked(self: objc.c.id, _: objc.c.SEL, sender: objc.c.id) callconv(.c) void {
     const previous = s;
@@ -2189,10 +2208,12 @@ fn initializeNative() !void {
     addMethod(view_class, "mouseDown:", mouseDown);
     addMethod(view_class, "mouseDragged:", mouseDragged);
     addMethod(view_class, "mouseUp:", mouseUp);
-    addMethod(view_class, "rightMouseDown:", rightMouseDown);
-    addMethod(view_class, "otherMouseDown:", middleMouseDown);
-    addMethod(view_class, "otherMouseDragged:", middleMouseDragged);
-    addMethod(view_class, "otherMouseUp:", middleMouseUp);
+    addMethod(view_class, "rightMouseDown:", mouseDown);
+    addMethod(view_class, "rightMouseDragged:", mouseDragged);
+    addMethod(view_class, "rightMouseUp:", mouseUp);
+    addMethod(view_class, "otherMouseDown:", mouseDown);
+    addMethod(view_class, "otherMouseDragged:", mouseDragged);
+    addMethod(view_class, "otherMouseUp:", mouseUp);
     addMethod(view_class, "draggingEntered:", dragEntered);
     addMethod(view_class, "performDragOperation:", dragPerformed);
     if (!nativeBool(c.class_addIvar(view_class.value, "yekkState", @sizeOf(*State), 3, "^v"))) return error.NativeInitialization;
@@ -2832,7 +2853,8 @@ const usage =
     \\Usage: yekk [OPTIONS] [--] FILE_OR_DIRECTORY...   (default: current directory)
     \\  -g, --geometry WxH[+X+Y]  -x, --borderless
     \\  -F, --fullscreen        -r, --recursive       --no-recursive
-    \\  -S, --sort natural|name|filename|dirname|mtime|size|none
+    \\  -S, --sort natural|name|filename|dirname|mtime|size|none|width|height|pixels|format
+    \\  --min-dimension WxH     --max-dimension WxH
     \\  --version-sort          -n, --reverse        -z, --randomize
     \\  -Z, --auto-zoom          -., --scale-down     --zoom PERCENT|max|fill
     \\  --zoom-step PERCENT     --keep-zoom-vp        --browse FILE
@@ -2844,7 +2866,9 @@ const usage =
     \\  -G, --draw-actions      -d, --draw-filename
     \\  -f, --filelist FILE     - (or -f -) reads paths from stdin
     \\  -|, --start-at FILE     --keys FILE           --config FILE
-    \\  -l, --list              --print-filelist      --formats
+    \\  -l, --list              -L, --customlist FORMAT
+    \\  -U, --loadable          -u, --unloadable       --print-filelist
+    \\  -T, --theme NAME        --buttons FILE        --formats
     \\  -h, --help              -v, --version
     \\  --decode-workers N      CPU decode budget (0: automatic)   --alloc-stats
     \\  --aggressive            Preload the list while memory is available
@@ -2859,6 +2883,19 @@ const usage =
     \\Compatibility details and unsupported feh features: docs/feh-compatibility.md
     \\
 ;
+fn catalogInfo(path: [:0]const u8, cancel: ?*const std.atomic.Value(bool)) ?catalog.Info {
+    const meta = decoder.metadataWithCancel(path, cancel) catch return null;
+    return catalog.Info.init(meta.width, meta.height, meta.format[0..meta.format_len], meta.alpha);
+}
+
+fn catalogLoadable(path: [:0]const u8) anyerror!bool {
+    const image = decoder.loadWithAllocator(path, 0, memory.allocator()) catch |err| return switch (err) {
+        error.OutOfMemory => err,
+        else => false,
+    };
+    image.destroy();
+    return true;
+}
 pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
     const pool = objc.AutoreleasePool.init();
     defer pool.deinit();
@@ -2888,7 +2925,12 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
     initState(s, 0, .{});
     control.active[0] = true;
     control.decode_worker_budget = n.performanceCores();
-    var iterator: options.Iterator = .{ .args = argv[1..@intCast(argc)] };
+    var theme: input.Theme = .{};
+    var iterator = theme.load(argv[1..@intCast(argc)]) catch |err| {
+        n.output(2, @errorName(err));
+        n.output(2, "\n");
+        return 2;
+    };
     while (iterator.next() catch |err| {
         n.output(2, @errorName(err));
         n.output(2, "\n");
@@ -2960,27 +3002,21 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
             n.output(2, "\n");
             return 1;
         };
+        s.catalog.probe = catalogInfo;
         s.catalog.build(s.input[0..s.input_count], s.options) catch |err| {
             n.output(2, @errorName(err));
             n.output(2, "\n");
             return 1;
         };
-        if (s.cli.listing == .metadata) n.output(1, "NUM\tFORMAT\tWIDTH\tHEIGHT\tPIXELS\tSIZE\tFILENAME\n");
-        for (s.catalog.entries[0..s.catalog.count], 0..) |e, number| {
-            if (s.cli.listing == .metadata) {
-                const meta = decoder.metadata(e.path) catch {
-                    n.output(2, "yekk: unreadable header: ");
-                    n.output(2, e.path);
-                    n.output(2, "\n");
-                    continue;
-                };
-                var buffer: [512]u8 = undefined;
-                const text = std.fmt.bufPrint(&buffer, "{d}\t{s}\t{d}\t{d}\t{d}\t{d}\t", .{ number + 1, meta.format[0..meta.format_len], meta.width, meta.height, @as(u64, meta.width) * meta.height, e.bytes }) catch return 1;
-                n.output(1, text);
-            }
-            n.output(1, e.path);
-            n.output(1, "\n");
+        if (s.cli.listing != .paths) {
+            input.loadSettings(&s.settings, s.cli.config, s.cli.keys, s.cli.buttons) catch return 2;
+            s.cli.apply(&s.settings);
         }
+        const matched = @import("listings.zig").run(s.cli.listing, &s.catalog, catalogInfo, catalogLoadable, s.settings.hooks[0]) catch |err| {
+            n.output(2, @errorName(err));
+            n.output(2, "\n");
+            return 1;
+        };
         if (s.cli.filelist) |path| if (!std.mem.eql(u8, path, "-")) {
             s.entries = s.catalog.entries[0..s.catalog.count];
             persistFilelist() catch |err| {
@@ -2989,7 +3025,7 @@ pub fn run(argc: c_int, argv: [*][*:0]const u8) c_int {
                 return 1;
             };
         };
-        return 0;
+        return if (matched) 0 else 1;
     }
     control.cli_inputs = !s.cli.default_directory;
     launch() catch |err| {

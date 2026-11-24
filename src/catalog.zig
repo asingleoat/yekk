@@ -4,9 +4,70 @@ const c = @import("system");
 const runtime = @import("runtime");
 const files = runtime.files;
 pub const capacity = 16384;
-pub const Entry = struct { path: [:0]const u8, id: usize, mtime: i128 = 0, bytes: i64 = 0 };
-pub const Sort = enum { natural, name, filename, dirname, mtime, size, none };
-pub const Options = struct { recursive: bool = false, browse: bool = false, sort: ?Sort = null, reverse: bool = false, shuffle: bool = false, version_sort: bool = false, start_at: ?[:0]const u8 = null };
+pub const Dimensions = struct {
+    width: u32 = 0,
+    height: u32 = 0,
+
+    pub fn parse(text: []const u8) !Dimensions {
+        const split = std.mem.indexOfScalar(u8, text, 'x') orelse return error.InvalidDimensions;
+        return .{ .width = try axis(text[0..split]), .height = try axis(text[split + 1 ..]) };
+    }
+
+    fn axis(text: []const u8) !u32 {
+        const value = std.fmt.parseInt(i64, text, 10) catch return error.InvalidDimensions;
+        return std.math.cast(u32, @max(0, value)) orelse error.InvalidDimensions;
+    }
+};
+pub const Info = struct {
+    size: Dimensions,
+    format: [32]u8 = @splat(0),
+    alpha: bool = false,
+
+    pub fn init(width: u32, height: u32, format: []const u8, alpha: bool) Info {
+        var result: Info = .{ .size = .{ .width = width, .height = height }, .alpha = alpha };
+        const label = if (std.mem.eql(u8, format, "jpeg")) "jpg" else if (std.mem.eql(u8, format, "tif")) "tiff" else format;
+        const len = @min(label.len, result.format.len - 1);
+        @memcpy(result.format[0..len], label[0..len]);
+        return result;
+    }
+
+    pub fn name(self: *const Info) []const u8 {
+        return std.mem.sliceTo(&self.format, 0);
+    }
+};
+pub const Probe = *const fn ([:0]const u8, ?*const std.atomic.Value(bool)) ?Info;
+pub const Entry = struct {
+    path: [:0]const u8,
+    label: ?[:0]const u8 = null,
+    id: usize,
+    mtime: i128 = 0,
+    bytes: i64 = 0,
+
+    pub fn display(self: Entry) [:0]const u8 {
+        return self.label orelse self.path;
+    }
+};
+pub const Sort = enum { natural, name, filename, dirname, mtime, size, none, width, height, pixels, format };
+pub const Options = struct {
+    recursive: bool = false,
+    browse: bool = false,
+    sort: ?Sort = null,
+    reverse: bool = false,
+    shuffle: bool = false,
+    version_sort: bool = false,
+    start_at: ?[:0]const u8 = null,
+    minimum: Dimensions = .{},
+    maximum: Dimensions = .{},
+    report_paths: bool = false,
+
+    pub fn needsInfo(self: Options) bool {
+        return self.minimum.width != 0 or self.minimum.height != 0 or
+            self.maximum.width != 0 or self.maximum.height != 0 or switch (self.sort orelse .none) {
+            .width, .height, .pixels, .format => true,
+            else => false,
+        };
+    }
+};
 
 pub const Catalog = struct {
     cancel: ?*const std.atomic.Value(bool) = null,
@@ -18,66 +79,126 @@ pub const Catalog = struct {
     selected: ?[:0]const u8 = null,
     initial: ?Entry = null,
     on_initial: ?*const fn (Entry) void = null,
+    probe: ?Probe = null,
+    // Populated by metadata sorting, filtering or listing.
+    info: [capacity]Info = undefined,
+    info_ready: bool = false,
 
-    fn add(self: *Catalog, path: []const u8, st: c.struct_stat) !void {
+    fn add(self: *Catalog, path: []const u8, label: ?[]const u8, st: c.struct_stat) !void {
         if (self.selected) |selected| if (std.mem.eql(u8, selected, path)) {
-            for (self.entries[0..self.count]) |e| if (std.mem.eql(u8, selected, path) and std.mem.eql(u8, e.path, path)) return;
+            for (self.entries[0..self.count]) |e| if (std.mem.eql(u8, e.path, path)) return;
         };
-        if (self.count == capacity or path.len + 1 > self.paths.len - self.used) return error.CatalogCapacityExceeded;
-        const start = self.used;
-        @memcpy(self.paths[start..][0..path.len], path);
-        self.paths[start + path.len] = 0;
-        self.used += path.len + 1;
+        if (self.count == capacity) return error.CatalogCapacityExceeded;
+        const stored = try self.storePath(path);
+        const display = if (label) |value| if (std.mem.eql(u8, value, path)) null else try self.storePath(value) else null;
         const modified = if (runtime.darwin) st.st_mtimespec else st.st_mtim;
-        const entry: Entry = .{ .path = self.paths[start..][0..path.len :0], .id = self.count, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
+        const entry: Entry = .{ .path = stored, .label = display, .id = self.count, .bytes = st.st_size, .mtime = @as(i128, modified.tv_sec) * std.time.ns_per_s + modified.tv_nsec };
         self.entries[self.count] = entry;
         self.count += 1;
     }
 
+    fn storePath(self: *Catalog, path: []const u8) ![:0]const u8 {
+        if (path.len + 1 > self.paths.len - self.used) return error.CatalogCapacityExceeded;
+        const start = self.used;
+        @memcpy(self.paths[start..][0..path.len], path);
+        self.paths[start + path.len] = 0;
+        self.used += path.len + 1;
+        return self.paths[start..][0..path.len :0];
+    }
+
     pub fn build(self: *Catalog, inputs: []const [:0]const u8, options: Options) !void {
+        const keep_labels = options.report_paths or options.start_at != null;
         for (inputs, 0..) |input, argument| {
             if (self.cancel) |cancel| if (cancel.load(.acquire)) return error.Cancelled;
             var resolved: [4096]u8 = undefined;
             var st: c.struct_stat = undefined;
-            if (files.stat(input.ptr, &st) != 0) return error.PathNotReadable;
+            if (files.stat(input.ptr, &st) != 0) {
+                if (!options.report_paths) return error.PathNotReadable;
+                runtime.output(2, "yekk: cannot read ");
+                runtime.output(2, input);
+                runtime.output(2, "\n");
+                continue;
+            }
             if (st.st_mode & c.S_IFMT == c.S_IFDIR) {
                 if (c.realpath(input.ptr, &resolved) == null) return error.PathNotReadable;
-                try self.directory(std.mem.sliceTo(&resolved, 0), options, 0);
+                try self.directory(std.mem.sliceTo(&resolved, 0), if (keep_labels) input else null, options, 0);
             } else if (st.st_mode & c.S_IFMT == c.S_IFREG) {
                 const path = try operationPath(input, &resolved);
-                try self.add(path, st);
+                try self.add(path, if (keep_labels) input else null, st);
                 if (argument == 0) {
                     self.initial = self.entries[self.count - 1];
-                    if (self.on_initial) |callback| callback(self.initial.?);
+                    if (!options.needsInfo()) if (self.on_initial) |callback| callback(self.initial.?);
                 }
                 if (options.browse and inputs.len == 1) {
                     self.selected = self.entries[0].path;
-                    try self.directory(std.fs.path.dirname(path).?, options, 0);
-                    std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
+                    try self.directory(std.fs.path.dirname(path).?, if (keep_labels) std.fs.path.dirname(input) orelse "." else null, options, 0);
+                    if (options.sort != .none) std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
                 }
             } else return error.UnsupportedFileType;
         }
+        if (options.needsInfo()) try self.filterInfo(options);
         if (options.sort) |mode| {
-            if (mode != .none) std.mem.sort(Entry, self.entries[0..self.count], options, ordered);
+            if (mode != .none) std.mem.sort(Entry, self.entries[0..self.count], SortContext{ .options = options, .info = &self.info }, ordered);
         } else if (options.version_sort) std.mem.sort(Entry, self.entries[0..self.count], Sort.natural, less);
+        if (options.reverse) std.mem.reverse(Entry, self.entries[0..self.count]);
+        if (options.shuffle) self.random.random().shuffle(Entry, self.entries[0..self.count]);
         if (options.start_at) |input| {
-            var resolved: [4096]u8 = undefined;
-            const target = operationPath(input, &resolved) catch return error.StartImageNotFound;
             self.selected = null;
-            for (self.entries[0..self.count]) |e| if (std.mem.eql(u8, target, e.path)) {
-                self.selected = e.path;
-                break;
+            for (self.entries[0..self.count]) |entry| {
+                if (std.mem.eql(u8, input, entry.display())) {
+                    self.selected = entry.path;
+                    break;
+                }
+            }
+            if (self.selected == null) for (self.entries[0..self.count]) |e| {
+                if (std.mem.eql(u8, std.fs.path.basename(input), std.fs.path.basename(e.path))) {
+                    self.selected = e.path;
+                    break;
+                }
             };
             if (self.selected == null) return error.StartImageNotFound;
         }
-        if (options.reverse) std.mem.reverse(Entry, self.entries[0..self.count]);
-        if (options.shuffle) self.random.random().shuffle(Entry, self.entries[0..self.count]);
         if (self.count == 0) return error.NoImagesFound;
     }
 
-    fn directory(self: *Catalog, path: []const u8, options: Options, depth: usize) !void {
+    pub fn prepareListingInfo(self: *Catalog, probe: Probe) usize {
+        var readable: usize = 0;
+        for (self.entries[0..self.count]) |entry| {
+            if (!self.info_ready) self.info[entry.id] = probe(entry.path, self.cancel) orelse .{ .size = .{} };
+            if (self.info[entry.id].size.width != 0) readable += 1;
+        }
+        self.info_ready = true;
+        return readable;
+    }
+    pub fn listingInfo(self: *const Catalog, entry: Entry) ?Info {
+        if (!self.info_ready) return null;
+        const info = self.info[entry.id];
+        return if (info.size.width != 0) info else null;
+    }
+
+    fn filterInfo(self: *Catalog, options: Options) !void {
+        const probe = self.probe orelse return error.MetadataUnavailable;
+        var count: usize = 0;
+        for (self.entries[0..self.count]) |entry| {
+            if (self.cancel) |cancel| if (cancel.load(.acquire)) return error.Cancelled;
+            const info = probe(entry.path, self.cancel) orelse continue;
+            if (info.size.width < options.minimum.width or info.size.height < options.minimum.height or
+                (options.maximum.width != 0 and info.size.width > options.maximum.width) or
+                (options.maximum.height != 0 and info.size.height > options.maximum.height)) continue;
+            var kept = entry;
+            kept.id = count;
+            self.entries[count] = kept;
+            self.info[count] = info;
+            count += 1;
+        }
+        self.count = count;
+        self.info_ready = true;
+    }
+
+    fn directory(self: *Catalog, path: []const u8, display: ?[]const u8, options: Options, depth: usize) !void {
         if (depth >= 64 or path.len >= 4095) return error.DirectoryDepthOrPathLimit;
         var full: [4096:0]u8 = undefined;
+        var label_buffer: [4096]u8 = undefined;
         @memcpy(full[0..path.len], path);
         full[path.len] = 0;
         const dir = files.opendir(&full) orelse return error.DirectoryNotReadable;
@@ -103,13 +224,17 @@ pub const Catalog = struct {
             var st: c.struct_stat = undefined;
             if (files.lstat(child.ptr, &st) != 0) continue; // A concurrently removed entry.
             const kind = st.st_mode & c.S_IFMT;
+            const label = if (display) |dir_name|
+                try std.fmt.bufPrint(&label_buffer, "{s}{s}{s}", .{ dir_name, if (std.mem.endsWith(u8, dir_name, "/")) "" else "/", name })
+            else
+                null;
             if (kind == c.S_IFDIR) {
-                if (options.recursive) try self.directory(child, options, depth + 1);
-            } else if (candidate(name)) {
+                if (options.recursive) try self.directory(child, label, options, depth + 1);
+            } else if (options.report_paths or candidate(name)) {
                 if (kind == c.S_IFLNK) {
                     if (files.stat(child.ptr, &st) != 0 or st.st_mode & c.S_IFMT != c.S_IFREG) continue;
                 } else if (kind != c.S_IFREG) continue;
-                try self.add(child, st);
+                try self.add(child, label, st);
             }
         }
         if (options.sort != .none) std.mem.sort(Entry, self.entries[start..self.count], Sort.natural, less);
@@ -174,8 +299,8 @@ pub fn natural(a: []const u8, b: []const u8) std.math.Order {
 fn less(mode: Sort, a: Entry, b: Entry) bool {
     if (mode == .mtime and a.mtime != b.mtime) return a.mtime > b.mtime;
     if (mode == .size and a.bytes != b.bytes) return a.bytes < b.bytes;
-    const name_a = if (mode == .name) a.path else if (mode == .dirname) std.fs.path.dirname(a.path) orelse "" else std.fs.path.basename(a.path);
-    const name_b = if (mode == .name) b.path else if (mode == .dirname) std.fs.path.dirname(b.path) orelse "" else std.fs.path.basename(b.path);
+    const name_a = if (mode == .name) a.display() else if (mode == .dirname) std.fs.path.dirname(a.display()) orelse "" else std.fs.path.basename(a.display());
+    const name_b = if (mode == .name) b.display() else if (mode == .dirname) std.fs.path.dirname(b.display()) orelse "" else std.fs.path.basename(b.display());
     const order = if (mode == .name or mode == .filename or mode == .dirname) std.mem.order(u8, name_a, name_b) else natural(name_a, name_b);
     return if (order == .eq) std.mem.lessThan(u8, a.path, b.path) else order == .lt;
 }
@@ -189,8 +314,25 @@ test "natural ordering is deterministic with arbitrary length numbers" {
     try std.testing.expect(!candidate("notes.md"));
 }
 
-fn ordered(options: Options, a: Entry, b: Entry) bool {
+const SortContext = struct { options: Options, info: *const [capacity]Info };
+fn ordered(context: SortContext, a: Entry, b: Entry) bool {
+    const options = context.options;
     const mode = options.sort orelse .natural;
+    switch (mode) {
+        .width, .height, .pixels, .format => {
+            const left = &context.info[a.id];
+            const right = &context.info[b.id];
+            const order = switch (mode) {
+                .width => std.math.order(left.size.width, right.size.width),
+                .height => std.math.order(left.size.height, right.size.height),
+                .pixels => std.math.order(@as(u64, left.size.width) * left.size.height, @as(u64, right.size.width) * right.size.height),
+                .format => std.mem.order(u8, left.name(), right.name()),
+                else => unreachable,
+            };
+            return if (order == .eq) a.id < b.id else order == .lt;
+        },
+        else => {},
+    }
     if (!options.version_sort or (mode != .name and mode != .filename and mode != .dirname)) return less(mode, a, b);
     const left = if (mode == .filename) std.fs.path.basename(a.path) else if (mode == .dirname) std.fs.path.dirname(a.path) orelse "" else a.path;
     const right = if (mode == .filename) std.fs.path.basename(b.path) else if (mode == .dirname) std.fs.path.dirname(b.path) orelse "" else b.path;

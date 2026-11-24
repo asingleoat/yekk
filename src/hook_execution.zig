@@ -36,5 +36,5 @@ pub fn run(buffer: []u8, template: hooks.Command, captured: hooks.Snapshot, path
         snapshot.manifest = path;
     }
     const command = try hooks.format(buffer, template.body(), snapshot);
-    return commands.run(command, cancel);
+    return commands.runWithOutput(command, cancel, if (snapshot.mode == .slideshow) .capture else .inherit);
 }
