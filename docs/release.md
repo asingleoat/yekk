@@ -1,6 +1,6 @@
 # Release packaging
 
-Attach tested portable binaries.
+Attach only the tested portable packages.
 Complete local builds and tests before using hosted builds.
 GitHub workflows are disabled. Enabling them and publishing releases require
 manual approval.
@@ -82,9 +82,9 @@ This is a directory distribution, not a single static executable.
 ## Release contents
 
 Include `LICENSE`, dependency notices and `THIRD-PARTY.json` in each package.
-The Git tag identifies the exact source, including Nix inputs and patches.
-The flake's `release-sources` output contains the pinned dependency sources
-and Nixpkgs build recipes. Record runtime coverage in the release notes.
+The Git tag identifies the source for the release. Build from that tag to use
+the dependencies and patches pinned by Nix. Record runtime coverage in the
+release notes.
 
 Run the [validation checks](validation.md) on mounted or extracted packages.
 Store architecture, OS, display backend, file hashes and untested cases under `dist/`.
